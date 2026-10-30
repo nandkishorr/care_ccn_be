@@ -1,0 +1,61 @@
+{
+  "context": {
+    "networkId": "medtroniclabs.org/sandbox_ccn_reference_registry-diagnostic-t2",
+    "action": "init",
+    "version": "2.0.0",
+    "bapId": "cnn_beck_bap.ohc.network",
+    "bapUri": "https://roving-whiny-underpay.ngrok-free.dev/bap/receiver",
+    "transactionId": "a9046a23-4550-4cc1-b6ab-6aa5c86ce29f",
+    "messageId": "16975615-aeb3-5bcc-ad17-063455eb4909",
+    "timestamp": "2026-06-19T09:35:00+05:30",
+    "bppId": "cnn_beck_bpp.ohc.network",
+    "bppUri": "http://onix-bpp:8082/bpp/receiver"
+  },
+  "message": {
+    "contract": {
+      "status": {"code": "ACTIVE"},
+      "commitments": [
+        {
+          "id": "commitment-7e772edf-4c5f-4707-aeee-3fa6830aa1c2",
+          "status": {"descriptor": {"code": "ACTIVE"}},
+          "resources": [{"id": "7e772edf-4c5f-4707-aeee-3fa6830aa1c2", "quantity": {"count": 1}}],
+          "offer": {
+            "id": "offer-7e772edf-4c5f-4707-aeee-3fa6830aa1c2",
+            "resourceIds": ["7e772edf-4c5f-4707-aeee-3fa6830aa1c2"]
+          }
+        }
+      ],
+      "participants": [
+        {
+          "descriptor": {"name": "Meena Joshi", "shortDesc": "Patient (Subject)"},
+          "participantAttributes": {
+            "@context": "https://schema.beckn.io/HealthParticipant/v2.1/context.jsonld",
+            "@type": "hpa:HealthParticipant",
+            "participantRole": "PATIENT",
+            "primaryLanguage": "en",
+            "gender": "FEMALE",
+            "dateOfBirth": "1985-04-12",
+            "healthIds": [{"system": "ABHA", "value": "91-1234-5678-9012"}]
+          }
+        }
+      ],
+      "performance": [
+        {
+          "id": "19a946fb-c4a6-40e1-88e7-6416feaa9626",
+          "performanceAttributes": {
+            "@context": "https://schema.beckn.io/HealthPerformance/v2.1/context.jsonld",
+            "@type": "hpe:HealthPerformance",
+            "healthServiceType": "PHYSICAL_CONSULTATION",
+            "appointmentWindowStart": "2026-06-19T16:06:00+00:00",
+            "appointmentWindowEnd": "2026-06-19T16:30:00+00:00"
+          }
+        }
+      ],
+      "contractAttributes": {
+        "@context": "https://schema.beckn.io/HealthContract/v2.1/context.jsonld",
+        "@type": "hct:HealthContract",
+        "healthServiceType": "PHYSICAL_CONSULTATION"
+      }
+    }
+  }
+}

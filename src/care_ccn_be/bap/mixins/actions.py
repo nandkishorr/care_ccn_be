@@ -63,8 +63,9 @@ class BapStatusMixin:
 
 
 class BapUpdateMixin:
-    @action(detail=True, methods=["post"], url_path="update")
-    def update(self, request, transaction_id=None):
+    # not named ``update``: DRF reserves that name for the router's PUT route
+    @action(detail=True, methods=["post"], url_path="update", url_name="update")
+    def update_contract(self, request, transaction_id=None):
         return self.run("update", request, transaction_id)
 
     def bap_update(self, source: BapSource):

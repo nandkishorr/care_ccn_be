@@ -158,7 +158,7 @@ def _as_dict(message: Any) -> dict:
 
 
 def record_outbound(
-    txn: BecknTransaction,
+    txn: BecknTransaction | None,
     context: dict,
     message: Any,
     error: dict | None = None,
@@ -177,7 +177,7 @@ def record_outbound(
         reply_to=reply_to,
         delivery_status=Delivery.QUEUED,
     )
-    if txn.side == Side.BAP and not is_callback(msg.action):
+    if txn is not None and txn.side == Side.BAP and not is_callback(msg.action):
         update_transaction(
             txn,
             status=TxnStatus.QUEUED,
