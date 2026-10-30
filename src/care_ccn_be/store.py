@@ -342,3 +342,39 @@ def purge_messages(days: int) -> int:
         return 0
     deleted, _ = BecknMessage.objects.filter(created_date__lt=timezone.now() - timedelta(days=days)).delete()
     return deleted
+
+
+# ----------------------------------------------------------------------------- backfill (idempotent imports)
+def backfill_transaction(
+    transaction_id: str, side: str, flow: str, source: str, **fields: Any
+) -> tuple[BecknTransaction, bool]:
+    state = {"v": 1, "legacy": {"source": source, "at": timezone.now().isoformat()}, **fields.pop("state", {})}
+    return BecknTransaction.objects.get_or_create(
+        transaction_id=transaction_id,
+        side=side,
+        defaults={"flow": flow, "state": state, **fields},
+    )
+
+
+def backfill_message(
+    txn: BecknTransaction,
+    message_id: str,
+    action: str,
+    direction: str,
+    payload: dict,
+    sender_id: str = "",
+    delivery_status: str = "",
+    processing_status: str = "",
+) -> tuple[BecknMessage, bool]:
+    return BecknMessage.objects.get_or_create(
+        message_id=message_id,
+        action=action,
+        direction=direction,
+        sender_id=sender_id,
+        defaults={
+            "transaction": txn,
+            "payload": payload,
+            "delivery_status": delivery_status,
+            "processing_status": processing_status,
+        },
+    )

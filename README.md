@@ -8,6 +8,7 @@ instead of Redis.
 
 - [Architecture](docs/architecture.md)
 - [Frontend API](docs/fe_api.md)
+- [Cutover, backfill and rollback](docs/cutover.md)
 
 ## Local development
 
