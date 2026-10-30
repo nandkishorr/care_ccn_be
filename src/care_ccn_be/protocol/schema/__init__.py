@@ -25,6 +25,7 @@ from care_ccn_be.protocol.schema.envelope import (
     DiscoverMessage,
     ErrorBlock,
     InboundMessage,
+    contract_attributes,
 )
 
 __all__ = [
@@ -56,4 +57,5 @@ __all__ = [
     "Quantity",
     "Resource",
     "Status",
+    "contract_attributes",
 ]

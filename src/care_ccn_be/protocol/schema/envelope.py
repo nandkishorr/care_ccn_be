@@ -59,3 +59,9 @@ class BecknRequest(BecknModel, Generic[M]):
     context: BecknContext
     message: M
     error: ErrorBlock | None = None
+
+
+def contract_attributes(request: "BecknRequest") -> Any:
+    """None-safe ``message.contract.contractAttributes`` of any request, used by ``BecknFlow.match``."""
+    contract = getattr(getattr(request, "message", None), "contract", None)
+    return getattr(contract, "contract_attributes", None)
