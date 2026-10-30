@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check src
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: care
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/care
+      REDIS_URL: redis://localhost:6379
+      CELERY_BROKER_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: care_ccn_be
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ohcnetwork/care
+          ref: develop
+          path: care
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Care and the plugin
+        working-directory: care
+        run: |
+          pip install pipenv
+          pipenv install --system --categories "packages dev-packages"
+          pip install -e ../care_ccn_be
+
+      - name: Register the plugin
+        working-directory: care
+        run: |
+          cat > plug_config.py <<'EOF'
+          from plugs.manager import PlugManager
+          from plugs.plug import Plug
+
+          plugs = [Plug(name="care_ccn_be", package_name="care_ccn_be", version="", configs={})]
+          manager = PlugManager(plugs)
+          EOF
+
+      - name: Check
+        working-directory: care
+        run: python manage.py check --settings=config.settings.test
+
+      - name: Test
+        working-directory: care
+        run: python manage.py test care_ccn_be --keepdb --parallel --shuffle --settings=config.settings.test
