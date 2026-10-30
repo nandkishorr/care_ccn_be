@@ -2,7 +2,12 @@
 
 Beckn (NFH / DHP) BAP and BPP plugin for [ohcnetwork/care](https://github.com/ohcnetwork/care).
 
-Status: phase 1 (scaffold). The protocol, framework and flows land in later phases; see the migration plan.
+It replaces Care core's `care/beckn` app: a pure protocol layer, a flow framework (BAP viewsets, BPP receiver and
+services, Celery delivery) and two flows, `referral` and `appointment`. Transactions and messages live in plugin tables
+instead of Redis.
+
+- [Architecture](docs/architecture.md)
+- [Frontend API](docs/fe_api.md)
 
 ## Local development
 
