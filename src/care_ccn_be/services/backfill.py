@@ -1,5 +1,8 @@
 """Imports legacy ``care.beckn`` data (blobs on Care rows, Redis records) into the plugin tables.
 
+Legacy referrals were stored as ``ResourceRequest`` rows; each one becomes a Care ``Referral`` (the request itself is
+left untouched and remembered on its ``ReferralLink.legacy_resource_request``).
+
 Idempotent (rows are keyed by ``(transaction_id, side)`` and the link constraints), batched, never calls ONIX and never
 deletes. Works whether or not the plugin's flows are enabled, so it can run before the cutover.
 """
@@ -11,16 +14,22 @@ from datetime import datetime
 from typing import Any
 
 from care.emr.models.patient import Patient
+from care.emr.models.referral import Referral
 from care.emr.models.resource_request import ResourceRequest
 from care.emr.models.scheduling.booking import TokenBooking
 from django.core.cache import cache
 from django.db import transaction
 
 from care_ccn_be import store
+from care_ccn_be.context_vars import suppress_beckn_signals
 from care_ccn_be.flows.appointment.models import AppointmentLink
+from care_ccn_be.flows.referral import lifecycle
+from care_ccn_be.flows.referral.builders import referral_type_for_category
 from care_ccn_be.flows.referral.models import ReferralLink, ReferralRole
 from care_ccn_be.identity import cc_endpoint
 from care_ccn_be.models import Delivery, Direction, Processing, Side
+from care_ccn_be.services import availability as availabilities
+from care_ccn_be.services import mappers
 from care_ccn_be.settings import plugin_settings
 
 BATCH = 500
@@ -36,6 +45,15 @@ SHAPES = {
 }
 ONLY = {"referral": (1, 2, 3, 4), "appointment": (5,), "redis": (6, 7)}
 OPEN_REFERRAL_STATUSES = ("pending", "approved", "transportation_to_be_arranged", "transfer_in_progress")
+RESOURCE_REQUEST_TO_REFERRAL_STATUS = {
+    "pending": lifecycle.PENDING,
+    "approved": lifecycle.IN_PROGRESS,
+    "transportation_to_be_arranged": lifecycle.IN_PROGRESS,
+    "transfer_in_progress": lifecycle.IN_PROGRESS,
+    "completed": lifecycle.COMPLETED,
+    "rejected": "rejected",
+    "cancelled": "cancelled",
+}
 SERVICE_TYPE_FLOWS = {
     "appointment": APPOINTMENT,
     "referral": REFERRAL,
@@ -152,8 +170,7 @@ class Backfill:
             sender_id=routing.get("bapId") or routing.get("bapUri") or "",
             processing_status=Processing.PROCESSED,
         )
-        linked = self.link_referral(txn, rr, role)
-        self.outcome("referral_confirm", created or msg_created or linked)
+        self.link_outcome("referral_confirm", txn, rr, role, created or msg_created)
 
     def referral_init(self, rr, blob: dict, role: str) -> None:
         tid = blob["transactionId"]
@@ -169,8 +186,7 @@ class Backfill:
             patient_id=rr.related_patient_id,
             facility_id=rr.origin_facility_id if role == ReferralRole.ORIGIN else rr.assigned_facility_id,
         )
-        linked = self.link_referral(txn, rr, role)
-        self.outcome("referral_init", created or linked)
+        self.link_outcome("referral_init", txn, rr, role, created)
         if created and not on_bap_side:
             self.count("referral_init", "ambiguous")
 
@@ -190,8 +206,7 @@ class Backfill:
             patient_id=rr.related_patient_id,
             facility_id=rr.origin_facility_id,
         )
-        linked = self.link_referral(txn, rr, ReferralRole.ORIGIN)
-        self.outcome("referral_on_confirm", created or linked)
+        self.link_outcome("referral_on_confirm", txn, rr, ReferralRole.ORIGIN, created)
 
     def sent_referrals(self) -> None:
         if not self.since:
@@ -209,7 +224,7 @@ class Backfill:
         self.batched(qs.iterator(chunk_size=BATCH), self.sent_referral)
 
     def sent_referral(self, rr: ResourceRequest) -> None:
-        if ReferralLink.objects.filter(resource_request=rr).exists():
+        if ReferralLink.objects.filter(legacy_resource_request=rr).exists():
             self.count("referral_sent", "existing")
             return
         cc = cc_endpoint()
@@ -226,15 +241,69 @@ class Backfill:
             patient_id=rr.related_patient_id,
             facility_id=rr.origin_facility_id,
         )
-        linked = self.link_referral(txn, rr, ReferralRole.ORIGIN)
-        self.outcome("referral_sent", created or linked)
+        self.link_outcome("referral_sent", txn, rr, ReferralRole.ORIGIN, created)
 
-    @staticmethod
-    def link_referral(txn, rr, role: str) -> bool:
+    def link_outcome(self, shape: str, txn, rr, role: str, changed: bool) -> None:
+        linked = self.link_referral(txn, rr, role)
+        if linked is None:
+            self.count(shape, "skipped")
+        else:
+            self.outcome(shape, changed or linked)
+
+    def link_referral(self, txn, rr, role: str) -> bool | None:
+        """Link ``rr``'s referral to ``txn``; ``None`` when it cannot become a referral (no patient)."""
         if ReferralLink.objects.filter(transaction=txn, role=role, active=True).exists():
             return False
-        ReferralLink.objects.create(transaction=txn, resource_request=rr, role=role, beckn_ref=txn.coordination_id)
+        referral, details = self.legacy_referral(rr, role)
+        if referral is None:
+            return None
+        ReferralLink.objects.create(
+            transaction=txn,
+            referral=referral,
+            role=role,
+            beckn_ref=txn.coordination_id,
+            details=details,
+            legacy_resource_request=rr,
+        )
         return True
+
+    @staticmethod
+    def legacy_referral(rr: ResourceRequest, role: str) -> tuple[Referral | None, dict]:
+        """The Referral of (legacy request, role), created once. A Care referral needs a patient."""
+        known = ReferralLink.objects.filter(legacy_resource_request=rr, role=role).select_related("referral").first()
+        if known is not None:
+            return known.referral, known.details
+        if rr.related_patient_id is None:
+            return None, {}
+        referral_type = referral_type_for_category(rr.category)
+        assigned = rr.assigned_facility
+        if role == ReferralRole.ASSIGNED and (assigned or rr.origin_facility):
+            availability = availabilities.for_facility(assigned or rr.origin_facility, referral_type)
+        else:
+            cc = cc_endpoint()
+            availability = availabilities.network(
+                cc.id, cc.uri, referral_type, str(assigned.external_id) if assigned else None
+            )
+        data = lifecycle.ReferralData(
+            patient=rr.related_patient,
+            availability=availability,
+            title=rr.title,
+            note=rr.reason or "",
+            urgency=mappers.urgency_tier(rr.emergency, rr.priority),
+            origin_facility_id=str(rr.origin_facility.external_id) if rr.origin_facility_id else None,
+            contact_name=rr.referring_facility_contact_name or "",
+            contact_number=rr.referring_facility_contact_number or "",
+            assignees=availabilities.assignees(availability) if role == ReferralRole.ASSIGNED else [],
+        )
+        with suppress_beckn_signals():
+            referral = Referral(
+                **data.fields(),
+                status=RESOURCE_REQUEST_TO_REFERRAL_STATUS.get(rr.status, lifecycle.PENDING),
+                created_by=rr.created_by,
+                updated_by=rr.updated_by,
+            )
+            referral.save()
+        return referral, data.details()
 
     # ------------------------------------------------------------------------------------ appointments (5)
     def appointments(self) -> None:
@@ -384,7 +453,11 @@ def unlinked_legacy_rows() -> int:
     referrals = (
         ResourceRequest.objects.filter(extensions__has_key="beckn")
         .filter(extensions__beckn__has_any_keys=["role", "transactionId"])
-        .exclude(pk__in=ReferralLink.objects.values("resource_request_id"))
+        .exclude(
+            pk__in=ReferralLink.objects.filter(legacy_resource_request__isnull=False).values(
+                "legacy_resource_request_id"
+            )
+        )
         .count()
     )
     bookings = (

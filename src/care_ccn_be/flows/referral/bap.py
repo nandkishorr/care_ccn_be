@@ -12,6 +12,7 @@ from care_ccn_be.bap.specs import BapSource, ContractRefSpec
 from care_ccn_be.bap.viewset import BapViewSetBase
 from care_ccn_be.exceptions import BecknError
 from care_ccn_be.flows.referral.builders import (
+    CATEGORY_FOR_TYPE,
     ReferralConfirmBuilder,
     ReferralInitBuilder,
     ReferralSelectBuilder,
@@ -36,7 +37,10 @@ def params_from_message(message: dict[str, Any]) -> dict[str, Any]:
     contract = mappers.get_contract(message)
     attributes = contract.get("contractAttributes") or {}
     descriptor = contract.get("descriptor") or {}
+    participant = mappers.find_patient_participant(message) or {}
     params = {
+        "patient_name": (participant.get("descriptor") or {}).get("name"),
+        "category": CATEGORY_FOR_TYPE.get(mappers.referral_type(message)),
         "facility": attributes.get("facilityId") or attributes.get("originFacilityId"),
         "assigned_facility_id": attributes.get("assignedFacilityId"),
         "title": descriptor.get("name"),

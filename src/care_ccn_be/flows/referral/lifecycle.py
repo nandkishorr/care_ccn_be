@@ -1,11 +1,11 @@
-"""Care ``ResourceRequest`` rows of a referral. Idempotent on (coordination id, role): repeated confirms and
-callbacks, on either side of a loopback exchange, never create a second origin or assigned request."""
+"""Care ``Referral`` rows of a referral. Idempotent on (coordination id, role): repeated confirms and callbacks,
+on either side of a loopback exchange, never create a second origin or assigned referral."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from care.emr.models.resource_request import ResourceRequest
-from care.emr.resources.resource_request.spec import StatusChoices
+from care.emr.models.referral import Referral
+from care.emr.resources.referral.spec import ReferralStatus
 from django.db import connection
 
 from care_ccn_be import store
@@ -17,48 +17,56 @@ from care_ccn_be.services.users import system_user
 ORIGIN = ReferralRole.ORIGIN.value
 ASSIGNED = ReferralRole.ASSIGNED.value
 
+PENDING = ReferralStatus.pending.value
+IN_PROGRESS = ReferralStatus.in_progress.value
+COMPLETED = ReferralStatus.completed.value
+
 
 @dataclass
-class RequestData:
-    origin_facility: Any
+class ReferralData:
+    patient: Any
+    availability: Any
     title: str
-    reason: str = ""
-    category: str = "other"
-    emergency: bool = False
-    priority: int | None = None
+    note: str = ""
+    urgency: str = mappers.URGENCY_ROUTINE
+    origin_facility_id: str | None = None
     contact_name: str = ""
     contact_number: str = ""
-    assigned_facility: Any = None
-    patient: Any = None
+    assignees: list = field(default_factory=list)
 
     def fields(self) -> dict[str, Any]:
         return {
-            "origin_facility": self.origin_facility,
-            "assigned_facility": self.assigned_facility,
-            "related_patient": self.patient,
-            "title": self.title[:255],
-            "reason": self.reason,
-            "category": self.category,
-            "emergency": self.emergency,
-            "priority": self.priority,
-            "referring_facility_contact_name": self.contact_name,
-            "referring_facility_contact_number": self.contact_number,
+            "availability": self.availability,
+            "patient": self.patient,
+            "title": self.title[:255] or "Care referral",
+            "note": self.note,
+            "assignees": self.assignees,
         }
 
+    def details(self) -> dict[str, Any]:
+        """What Care's Referral has no column for; read back when echoing the referral to the network."""
+        details: dict[str, Any] = {"urgency": self.urgency}
+        if self.origin_facility_id:
+            details["originFacilityId"] = self.origin_facility_id
+        if self.contact_name or self.contact_number:
+            details["contact"] = {"name": self.contact_name, "number": self.contact_number}
+        return details
+
     @classmethod
-    def from_message(cls, message: dict, origin, assigned=None, patient=None) -> "RequestData":
+    def from_message(
+        cls, message: dict, availability, patient, origin_facility_id: str | None = None, assignees=()
+    ) -> "ReferralData":
         values = mappers.referral_fields(message)
         return cls(
-            origin_facility=origin,
-            assigned_facility=assigned,
             patient=patient,
+            availability=availability,
             title=values["title"],
-            reason=values["reason"],
-            category=values["category"],
-            emergency=values["emergency"],
-            priority=values["priority"],
+            note=values["note"],
+            urgency=values["urgency"],
+            origin_facility_id=origin_facility_id,
             contact_name=values["referring_facility_contact_name"],
             contact_number=values["referring_facility_contact_number"],
+            assignees=list(assignees),
         )
 
 
@@ -76,16 +84,20 @@ def _bind(txn) -> str:
 def _links(coordination_id: str, role: str | None = None):
     queryset = ReferralLink.objects.filter(
         transaction__flow="referral", transaction__coordination_id=coordination_id, active=True
-    ).select_related("resource_request")
+    ).select_related("referral", "referral__availability", "referral__patient")
     return queryset.filter(role=role) if role else queryset
 
 
-def current(coordination_id: str, role: str | None = None) -> ResourceRequest | None:
-    """The live request of a referral; without a role the assigned request wins over the origin one."""
+def current_link(coordination_id: str, role: str | None = None) -> ReferralLink | None:
+    """The live link of a referral; without a role the assigned one wins over the origin one."""
     if not coordination_id:
         return None
-    link = _links(coordination_id, role).order_by("role", "pk").first()  # "assigned" sorts before "origin"
-    return link.resource_request if link else None
+    return _links(coordination_id, role).order_by("role", "pk").first()  # "assigned" sorts before "origin"
+
+
+def current(coordination_id: str, role: str | None = None) -> Referral | None:
+    link = current_link(coordination_id, role)
+    return link.referral if link else None
 
 
 def _serialize(coordination_id: str, role: str) -> None:
@@ -94,57 +106,58 @@ def _serialize(coordination_id: str, role: str) -> None:
         cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [f"referral:{coordination_id}:{role}"])
 
 
-def approve(request: ResourceRequest) -> ResourceRequest:
-    if request.status == StatusChoices.pending.value:
-        request.status = StatusChoices.approved.value
-        with suppress_beckn_signals():
-            request.save(update_fields=["status", "modified_date"])
-    return request
+def _set_status(referral: Referral, status: str) -> Referral:
+    referral.status = status
+    with suppress_beckn_signals():
+        referral.save(update_fields=["status", "modified_date"])
+    return referral
 
 
-def ensure_request(
-    txn, role: str, data: RequestData, approved: bool = False, coordination_id: str | None = None
-) -> ResourceRequest:
-    """Return the request of (coordination id, role), creating it (and linking it to ``txn``) if missing."""
+def approve(referral: Referral) -> Referral:
+    return _set_status(referral, IN_PROGRESS) if referral.status == PENDING else referral
+
+
+def ensure_referral(
+    txn, role: str, data: ReferralData, approved: bool = False, coordination_id: str | None = None
+) -> Referral:
+    """Return the referral of (coordination id, role), creating it (and linking it to ``txn``) if missing."""
     coordination_id = coordination_id or _bind(txn)
     _serialize(coordination_id, role)
-    request = current(coordination_id, role)
-    if request is not None:
-        return approve(request) if approved else request
+    referral = current(coordination_id, role)
+    if referral is not None:
+        return approve(referral) if approved else referral
     user = system_user()
     with suppress_beckn_signals():
-        request = ResourceRequest(
-            **data.fields(),
-            status=StatusChoices.approved.value if approved else StatusChoices.pending.value,
-            created_by=user,
-            updated_by=user,
-            extensions={"beckn": {"role": role, "coordinationId": coordination_id}},
+        referral = Referral(
+            **data.fields(), status=IN_PROGRESS if approved else PENDING, created_by=user, updated_by=user
         )
-        request.save()
-    ReferralLink.objects.create(transaction=txn, role=role, resource_request=request, beckn_ref=coordination_id)
-    return request
+        referral.save()
+    ReferralLink.objects.create(
+        transaction=txn, role=role, referral=referral, beckn_ref=coordination_id, details=data.details()
+    )
+    return referral
 
 
-def adopt(txn, role: str, request: ResourceRequest) -> ReferralLink:
-    """Link an existing request (created in Care by a user) to its outbound transaction."""
+def adopt(txn, role: str, referral: Referral, details: dict[str, Any] | None = None) -> ReferralLink:
+    """Link an existing referral (created in Care by a user) to its outbound transaction."""
     coordination_id = _bind(txn)
     _serialize(coordination_id, role)
     link, _ = ReferralLink.objects.get_or_create(
-        transaction=txn, role=role, active=True, defaults={"resource_request": request, "beckn_ref": coordination_id}
+        transaction=txn,
+        role=role,
+        active=True,
+        defaults={"referral": referral, "beckn_ref": coordination_id, "details": details or {}},
     )
     return link
 
 
-def complete(coordination_id: str, role: str) -> ResourceRequest | None:
-    request = current(coordination_id, role)
-    if request is None or request.status == StatusChoices.completed.value:
+def complete(coordination_id: str, role: str) -> Referral | None:
+    referral = current(coordination_id, role)
+    if referral is None or referral.status == COMPLETED:
         return None
-    request.status = StatusChoices.completed.value
-    with suppress_beckn_signals():
-        request.save(update_fields=["status", "modified_date"])
-    return request
+    return _set_status(referral, COMPLETED)
 
 
-def origin_request_id(txn) -> str | None:
-    request = current(coordination_of(txn), ORIGIN)
-    return str(request.external_id) if request else None
+def origin_referral_id(txn) -> str | None:
+    referral = current(coordination_of(txn), ORIGIN)
+    return str(referral.external_id) if referral else None

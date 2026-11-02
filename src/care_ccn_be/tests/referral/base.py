@@ -1,9 +1,10 @@
-from care.emr.models.resource_request import ResourceRequest
+from care.emr.models.referral import Referral
 from django.test import override_settings
 from model_bakery import baker
 
 from care_ccn_be.context_vars import suppress_beckn_signals
 from care_ccn_be.models import Side
+from care_ccn_be.services import availability as availabilities
 from care_ccn_be.tests.framework.base import PLUGIN, FrameworkTestBase, inbound_callback, inbound_request
 
 CC = {"BECKN_CC_BPP_ID": "cc.bpp", "BECKN_CC_BPP_URI": "http://cc.bpp"}
@@ -46,10 +47,23 @@ class ReferralTestBase(FrameworkTestBase):
         payload = inbound_request(action, txn_id, message_id, message=message, **ctx)
         return self.anon.post(f"/bpp/receiver/{action}", payload, format="json")
 
-    def create_request(self, **kwargs):
-        defaults = {"origin_facility": self.origin, "status": "pending", "category": "other", "extensions": {}}
+    def network_availability(self, referral_type="consultation", assigned=None):
+        return availabilities.network(
+            "cc.bpp", "http://cc.bpp", referral_type, str(assigned.external_id) if assigned else None
+        )
+
+    def create_referral(self, **kwargs):
+        """A pending referral on a network availability, saved with signals suppressed (a user's would not be)."""
+        defaults = {
+            "availability": self.network_availability(),
+            "patient": self.create_patient(name="Asha", gender="female"),
+            "status": "pending",
+            "title": "Heart",
+            "note": "",
+            "assignees": [],
+        }
         with suppress_beckn_signals():
-            return baker.make(ResourceRequest, **{**defaults, **kwargs})
+            return baker.make(Referral, **{**defaults, **kwargs})
 
     def referral_message(self, coordination_id="coord-1", facility=None, assigned=None, patient=None, **extra):
         participants = []

@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any
 
 from care.emr.resources.patient.spec import GenderChoices
-from care.emr.resources.resource_request.spec import StatusChoices
+from care.emr.resources.referral.spec import ReferralStatus
 
 LIFECYCLE_DRAFT = "DRAFT"
 LIFECYCLE_ACTIVE = "ACTIVE"
@@ -34,14 +34,16 @@ GENDER_TO_NFH = {
 }
 
 STATUS_TO_LIFECYCLE = {
-    StatusChoices.pending.value: LIFECYCLE_DRAFT,
-    StatusChoices.approved.value: LIFECYCLE_ACTIVE,
-    StatusChoices.rejected.value: LIFECYCLE_CANCELLED,
-    StatusChoices.cancelled.value: LIFECYCLE_CANCELLED,
-    StatusChoices.transportation_to_be_arranged.value: LIFECYCLE_ACTIVE,
-    StatusChoices.transfer_in_progress.value: LIFECYCLE_BOOKING_CONFIRMED,
-    StatusChoices.completed.value: LIFECYCLE_FULFILLED,
+    ReferralStatus.pending.value: LIFECYCLE_DRAFT,
+    ReferralStatus.in_progress.value: LIFECYCLE_ACTIVE,
+    ReferralStatus.completed.value: LIFECYCLE_FULFILLED,
+    ReferralStatus.cancelled.value: LIFECYCLE_CANCELLED,
+    ReferralStatus.rejected.value: LIFECYCLE_CANCELLED,
 }
+
+REFERRAL_TYPE_CONSULTATION = "consultation"
+REFERRAL_TYPE_LAB = "lab"
+SERVICE_CATEGORY_CONSULTATION = "CONSULTATION"
 
 URGENCY_EMERGENCY = "EMERGENCY"
 URGENCY_URGENT = "URGENT"
@@ -117,8 +119,16 @@ def referral_contact(message: dict[str, Any] | None) -> dict[str, str]:
     return {"referring_facility_contact_name": "", "referring_facility_contact_number": ""}
 
 
+def referral_type(message: dict[str, Any] | None) -> str:
+    """The Care referral type of an inbound HealthReferral: a consultation, else an investigation (lab)."""
+    category = ((get_contract_attributes(message).get("targetCriteria") or {}).get("serviceCategory") or {}).get("code")
+    if category and category != SERVICE_CATEGORY_CONSULTATION:
+        return REFERRAL_TYPE_LAB
+    return REFERRAL_TYPE_CONSULTATION
+
+
 def referral_fields(message: dict[str, Any] | None) -> dict[str, Any]:
-    """ResourceRequest field values derived from an inbound HealthReferral contract."""
+    """Referral values derived from an inbound HealthReferral contract."""
     attributes = get_contract_attributes(message)
     criteria = attributes.get("targetCriteria") or {}
     urgency = attributes.get("clinicalUrgencyTier") or criteria.get("urgencyTier")
@@ -129,12 +139,11 @@ def referral_fields(message: dict[str, Any] | None) -> dict[str, Any]:
     )
     return {
         "title": title[:255],
-        "reason": (attributes.get("consent") or {}).get("clinicalJustification")
+        "note": (attributes.get("consent") or {}).get("clinicalJustification")
         or (get_contract(message).get("descriptor") or {}).get("shortDesc")
         or specialty
         or "",
-        "emergency": urgency == URGENCY_EMERGENCY,
-        "priority": URGENCY_PRIORITY.get(urgency),
-        "category": "patient_care",
+        "urgency": urgency if urgency in URGENCY_PRIORITY else URGENCY_ROUTINE,
+        "referral_type": referral_type(message),
         **referral_contact(message),
     }

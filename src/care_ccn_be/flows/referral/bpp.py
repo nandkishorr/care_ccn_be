@@ -1,4 +1,4 @@
-"""Care as the coordinating centre (BPP): receives referrals from the network and tracks them as ResourceRequests."""
+"""Care as the coordinating centre (BPP): receives referrals from the network and tracks them as Care referrals."""
 
 from typing import Any
 
@@ -7,6 +7,8 @@ from care_ccn_be.bpp.service import BppCall, BppServiceBase
 from care_ccn_be.exceptions import BecknError
 from care_ccn_be.flows.referral import lifecycle
 from care_ccn_be.flows.referral.builders import ReferralEcho
+from care_ccn_be.identity import cc_endpoint
+from care_ccn_be.services import availability as availabilities
 from care_ccn_be.services import facility as facilities
 from care_ccn_be.services import mappers
 from care_ccn_be.services.patient import find_or_create_patient
@@ -40,8 +42,8 @@ class ReferralBppService(BppSelectMixin, BppInitMixin, BppConfirmMixin, BppStatu
         if facility is None:
             raise BecknError(INVALID_PAYLOAD, "No facility id in payload; cannot create the referral")
         role = lifecycle.ORIGIN if origin else lifecycle.ASSIGNED
-        request = self._ensure(call, role, origin, assigned, approved=False)
-        return ReferralEcho.on_init(call.message, request)
+        referral = self._ensure(call, role, origin, assigned, approved=False)
+        return ReferralEcho.on_init(call.message, referral, self._details(call, role))
 
     def bpp_confirm(self, call: BppCall) -> dict[str, Any]:
         origin, assigned = self._facilities(call)
@@ -51,14 +53,14 @@ class ReferralBppService(BppSelectMixin, BppInitMixin, BppConfirmMixin, BppStatu
             self._ensure(call, lifecycle.ORIGIN, origin, assigned, approved=True)
         if assigned is not None:
             self._ensure(call, lifecycle.ASSIGNED, origin, assigned, approved=True)
-        request = lifecycle.current(lifecycle.coordination_of(call.txn))
-        return ReferralEcho.on_confirm(call.message, request)
+        link = lifecycle.current_link(lifecycle.coordination_of(call.txn))
+        return ReferralEcho.on_confirm(call.message, link.referral, link.details)
 
     def bpp_status(self, call: BppCall) -> dict[str, Any]:
-        request = lifecycle.current(lifecycle.coordination_of(call.txn))
-        if request is None:
+        link = lifecycle.current_link(lifecycle.coordination_of(call.txn))
+        if link is None:
             raise BecknError(NOT_FOUND, "Referral not found for status")
-        return ReferralEcho.on_status(call.message, request)
+        return ReferralEcho.on_status(call.message, link.referral, link.details)
 
     @staticmethod
     def _facilities(call: BppCall):
@@ -66,8 +68,17 @@ class ReferralBppService(BppSelectMixin, BppInitMixin, BppConfirmMixin, BppStatu
         return facilities.resolve(origin), facilities.resolve(assigned)
 
     @staticmethod
+    def _details(call: BppCall, role: str) -> dict[str, Any]:
+        link = lifecycle.current_link(lifecycle.coordination_of(call.txn), role)
+        return link.details if link else {}
+
+    @staticmethod
     def _ensure(call: BppCall, role: str, origin, assigned, approved: bool):
-        """Idempotent on (coordination id, role): an existing request is reused, never duplicated."""
+        """Idempotent on (coordination id, role): an existing referral is reused, never duplicated.
+
+        The origin referral sits on the network availability of the coordination centre (the referral the
+        referring side raised); the assigned one sits on the receiving facility's availability.
+        """
         coordination_id = lifecycle.coordination_of(call.txn)
         existing = lifecycle.current(coordination_id, role)
         if existing is not None:
@@ -77,10 +88,21 @@ class ReferralBppService(BppSelectMixin, BppInitMixin, BppConfirmMixin, BppStatu
         patient = find_or_create_patient(
             mappers.get_contract_attributes(call.message), participant, facility, system_user()
         )
-        data = lifecycle.RequestData.from_message(
+        if patient is None:
+            raise BecknError(INVALID_PAYLOAD, "No patient participant in payload; cannot create the referral")
+        referral_type = mappers.referral_type(call.message)
+        if role == lifecycle.ASSIGNED:
+            availability = availabilities.for_facility(assigned or facility, referral_type)
+        else:
+            cc = cc_endpoint()
+            availability = availabilities.network(
+                cc.id, cc.uri, referral_type, str(assigned.external_id) if assigned else None
+            )
+        data = lifecycle.ReferralData.from_message(
             call.message,
-            origin=facility,
-            assigned=assigned if role == lifecycle.ASSIGNED else None,
-            patient=patient,
+            availability,
+            patient,
+            origin_facility_id=str(facility.external_id),
+            assignees=availabilities.assignees(availability) if role == lifecycle.ASSIGNED else (),
         )
-        return lifecycle.ensure_request(call.txn, role, data, approved=approved)
+        return lifecycle.ensure_referral(call.txn, role, data, approved=approved)

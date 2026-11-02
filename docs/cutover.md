@@ -9,6 +9,12 @@ Core's `care.beckn` and this plugin never run at the same time: the plugin stays
 beckn_backfill [--dry-run] [--since YYYY-MM-DD] [--only referral|appointment|redis] [--strip-legacy [--force]]
 ```
 
+Legacy referrals are `ResourceRequest` rows; the backfill turns each into a Care `Referral` (the request is left
+untouched and kept on `ReferralLink.legacy_resource_request`). A request without a patient cannot become a referral and
+is counted *skipped*. The origin referral goes on the coordination centre's network availability, the assigned one on
+the assigned facility's availability; both are created on demand (`manage.py beckn_referral_availability` pre-creates
+the network ones).
+
 Idempotent (rows keyed by `(transaction_id, side)` and the link constraints), batched (500 rows per DB transaction),
 never calls ONIX, never deletes. Backfilled transactions carry `state.legacy = {"source", "at"}`. It prints created /
 existing / ambiguous / skipped per shape. `--dry-run` runs everything and rolls each batch back, so the Redis shapes
@@ -16,10 +22,10 @@ that depend on earlier shapes (6 after 5) report lower counts than a real run.
 
 | Shape | Legacy data | Becomes |
 |---|---|---|
-| `referral_confirm` | `ResourceRequest.extensions["beckn"]` with `role` and `returnRouting` | BPP referral transaction (`ON_CONFIRM`), `ReferralLink`, and a synthetic inbound `confirm` holding the stored contract |
+| `referral_confirm` | `ResourceRequest.extensions["beckn"]` with `role` and `returnRouting` | BPP referral transaction (`ON_CONFIRM`), a `Referral` + `ReferralLink`, and a synthetic inbound `confirm` holding the stored contract |
 | `referral_init` | blob with `role` and `transactionId`, no `returnRouting` | BAP transaction if Redis still has the record, else BPP (counted *ambiguous*); `ON_INIT` + `ReferralLink` |
 | `referral_on_confirm` | blob with `transactionId` + `contract`, no `role` | BAP transaction (counterparty = coordination center, `ON_CONFIRM`) + origin `ReferralLink` |
-| `referral_sent` | referral with no blob that Care itself sent (RR id = transaction id) | BAP transaction + origin link. Needs `--since`; category in `BECKN_REFERRAL_CATEGORIES` and still open |
+| `referral_sent` | request with no blob that Care itself sent (RR id = transaction id) | BAP transaction, a `Referral` and the origin link. Needs `--since`; category in `BECKN_REFERRAL_CATEGORIES` (legacy requests only) and still open |
 | `appointment_booking` | `TokenBooking.meta["beckn"]` | BPP appointment transaction, `AppointmentLink`s (reschedule copies share one transaction; the newest non-rescheduled booking is the active link) and a synthetic inbound `confirm` |
 | `redis_booking_referral` | `beckn:booking-referral:<booking id>` | `coordination_id` of that booking's transaction |
 | `redis_transaction` | `beckn:txn:<id>` and `beckn:txn:<id>:<ACTION>` | BAP transaction plus one message per stored payload; only matters in the catch-up run |

@@ -17,7 +17,7 @@ class CareCcnBeConfig(AppConfig):
         from celery.signals import task_prerun
         from django.core.signals import request_started
 
-        from care_ccn_be import checks  # noqa: F401
+        from care_ccn_be import authz, checks  # noqa: F401
         from care_ccn_be.context_vars import reset_reschedules
         from care_ccn_be.flows.registry import FlowRegistry
         from care_ccn_be.settings import plugin_settings
@@ -25,6 +25,7 @@ class CareCcnBeConfig(AppConfig):
         request_started.connect(reset_reschedules, dispatch_uid="care_ccn_be.reset_reschedules.request")
         task_prerun.connect(reset_reschedules, dispatch_uid="care_ccn_be.reset_reschedules.task")
         FlowRegistry.autodiscover()
+        authz.register()
 
         if not plugin_settings.BECKN_ALLOWED_IPS and not plugin_settings.BECKN_SHARED_SECRET:
             logger.warning(

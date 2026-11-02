@@ -1,5 +1,6 @@
-"""Care extension registrations. ``extensions.beckn`` on a ResourceRequest carries the referral target, which the
-user (or Care's UI) sets and the referral flow reads when sending the request out."""
+"""Care extension registrations. The referral target now lives on the network ``ReferralAvailability``
+(``services/availability.py``); the ResourceRequest extension stays registered only so legacy rows that still carry
+``extensions.beckn`` keep validating and serializing."""
 
 from care.emr.extensions.base import ExtensionResource, PlugExtension
 from care.emr.registries.extensions.registry import ExtensionRegistry

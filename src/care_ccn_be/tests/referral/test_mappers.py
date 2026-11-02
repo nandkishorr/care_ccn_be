@@ -66,18 +66,32 @@ class ContractHelpersTests(SimpleTestCase):
     def test_referral_fields(self):
         fields = mappers.referral_fields(self.message)
         self.assertEqual(fields["title"], "Heart")
-        self.assertEqual(fields["reason"], "pain")
-        self.assertEqual((fields["emergency"], fields["priority"]), (False, 2))
+        self.assertEqual(fields["note"], "pain")
+        self.assertEqual((fields["urgency"], fields["referral_type"]), ("URGENT", "consultation"))
         self.assertEqual(fields["referring_facility_contact_name"], "Dr Who")
         self.assertEqual(len(fields["referring_facility_contact_number"]), 14)
 
     def test_empty_message_is_safe(self):
         self.assertIsNone(mappers.find_patient_participant({}))
         self.assertEqual(mappers.referral_fields(None)["title"], "NFH Referral")
+        self.assertEqual(mappers.referral_fields(None)["urgency"], "ROUTINE")
+
+    def test_unknown_urgency_is_routine(self):
+        message = {"contract": {"contractAttributes": {"clinicalUrgencyTier": "WHENEVER"}}}
+        self.assertEqual(mappers.referral_fields(message)["urgency"], "ROUTINE")
+
+    def test_investigations_are_lab_referrals_everything_else_a_consultation(self):
+        def message(code):
+            return {"contract": {"contractAttributes": {"targetCriteria": {"serviceCategory": {"code": code}}}}}
+
+        self.assertEqual(mappers.referral_type(message("INVESTIGATION")), "lab")
+        self.assertEqual(mappers.referral_type(message("CONSULTATION")), "consultation")
+        self.assertEqual(mappers.referral_type({}), "consultation")
 
     def test_status_to_lifecycle(self):
         self.assertEqual(mappers.map_status_to_lifecycle("pending"), "DRAFT")
-        self.assertEqual(mappers.map_status_to_lifecycle("approved"), "ACTIVE")
+        self.assertEqual(mappers.map_status_to_lifecycle("in_progress"), "ACTIVE")
         self.assertEqual(mappers.map_status_to_lifecycle("completed"), "FULFILLED")
         self.assertEqual(mappers.map_status_to_lifecycle("cancelled"), "CANCELLED")
+        self.assertEqual(mappers.map_status_to_lifecycle("rejected"), "CANCELLED")
         self.assertEqual(mappers.map_status_to_lifecycle("nonsense"), "DRAFT")

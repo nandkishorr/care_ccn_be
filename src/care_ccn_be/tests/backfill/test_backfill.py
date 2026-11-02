@@ -3,6 +3,7 @@ from io import StringIO
 from unittest import mock
 
 from care.emr.models.patient import Patient
+from care.emr.models.referral import Referral
 from care.emr.models.resource_request import ResourceRequest
 from care.emr.models.scheduling.booking import TokenBooking
 from django.core.management import call_command
@@ -45,6 +46,7 @@ class BackfillTestBase(AppointmentTestBase):
         defaults = {
             "origin_facility": self.facility,
             "assigned_facility": target,
+            "related_patient": self.patient,
             "status": "pending",
             "category": "other",
             "extensions": {"beckn": beckn} if beckn is not None else {},
@@ -82,7 +84,9 @@ class ReferralShapesTest(BackfillTestBase):
         self.assertEqual(txn.state["legacy"]["source"], "referral_confirm")
         msg = BecknMessage.objects.get(transaction=txn, action="confirm")
         self.assertEqual(msg.payload["message"]["contract"], contract)
-        self.assertEqual(ReferralLink.objects.get(transaction=txn).resource_request, rr)
+        link = ReferralLink.objects.get(transaction=txn)
+        self.assertEqual((link.legacy_resource_request, link.role), (rr, "assigned"))
+        self.assertEqual(link.referral.availability.facility, rr.assigned_facility)
 
     def test_init_blob_is_bpp_and_ambiguous_without_a_redis_record(self):
         self.make_rr({"role": "assigned", "transactionId": "t-2", "coordinationId": "coord-2"})
@@ -103,7 +107,8 @@ class ReferralShapesTest(BackfillTestBase):
         txn = BecknTransaction.objects.get(transaction_id="t-4", side=Side.BAP)
         self.assertEqual((txn.counterparty_id, txn.coordination_id, txn.contract_id), ("cc.bpp", "t-4", "c-4"))
         link = ReferralLink.objects.get(transaction=txn)
-        self.assertEqual((link.role, link.resource_request), ("origin", rr))
+        self.assertEqual((link.role, link.legacy_resource_request), ("origin", rr))
+        self.assertEqual(link.referral.availability.entity_type, "external")
 
     def test_sent_referral_needs_since_and_matches_trigger(self):
         approved = self.make_rr(status="approved")
@@ -124,6 +129,48 @@ class ReferralShapesTest(BackfillTestBase):
         self.run_backfill()
         self.assertEqual(BecknTransaction.objects.count(), 1)
         self.assertEqual(ReferralLink.objects.count(), 1)
+        self.assertEqual(Referral.objects.count(), 1)
+
+    def test_a_legacy_request_becomes_a_referral_with_its_details(self):
+        rr = self.make_rr(
+            {"transactionId": "t-6", "contract": {"id": "c"}},
+            title="Heart",
+            reason="pain",
+            status="transfer_in_progress",
+            category="patient_care",
+            emergency=True,
+            referring_facility_contact_name="Dr Who",
+        )
+        self.run_backfill()
+        link = ReferralLink.objects.get()
+        referral = link.referral
+        self.assertEqual((referral.title, referral.note, referral.status), ("Heart", "pain", "in_progress"))
+        self.assertEqual(referral.patient, rr.related_patient)
+        self.assertEqual(referral.availability.referral_type, "consultation")
+        self.assertEqual(
+            link.details,
+            {
+                "urgency": "EMERGENCY",
+                "originFacilityId": str(rr.origin_facility.external_id),
+                "contact": {"name": "Dr Who", "number": rr.referring_facility_contact_number or ""},
+            },
+        )
+        self.assertTrue(ResourceRequest.objects.filter(pk=rr.pk).exists())
+
+    def test_the_same_request_is_one_referral_per_role(self):
+        rr = self.make_rr({"role": "assigned", "transactionId": "t-7", "returnRouting": {"bapId": "b"}})
+        self.run_backfill()
+        ReferralLink.objects.update(active=False)
+        self.run_backfill()
+        self.assertEqual(Referral.objects.count(), 1)
+        self.assertEqual(ReferralLink.objects.filter(legacy_resource_request=rr, active=True).count(), 1)
+
+    def test_a_request_without_a_patient_cannot_become_a_referral(self):
+        self.make_rr({"transactionId": "t-8", "contract": {"id": "c"}}, related_patient=None)
+        out = self.run_backfill()
+        self.assertFalse(Referral.objects.exists())
+        self.assertFalse(ReferralLink.objects.exists())
+        self.assertIn("referral_on_confirm", out)
 
 
 class AppointmentShapesTest(BackfillTestBase):

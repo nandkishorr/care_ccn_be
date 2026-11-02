@@ -27,7 +27,7 @@ Rules, enforced by tests (`tests/protocol/test_purity.py`, `tests/framework/test
 |---|---|
 | `BecknTransaction` | One row per `(transaction_id, side)`. A loopback conversation has a BAP row and a BPP row. Holds status, counterparty routing, `contract_id`, `coordination_id`, the typed per-flow `state` JSON and `last_error`. |
 | `BecknMessage` | Every request and callback in both directions: the audit log and the outbox in one table. Unique on `(message_id, action, direction, sender_id)`, which is what makes inbound retries idempotent. |
-| `BecknLink` (abstract) | Each flow subclasses it to tie its Care rows (`ResourceRequest`, `TokenBooking`) to a transaction. |
+| `BecknLink` (abstract) | Each flow subclasses it to tie its Care rows (`Referral`, `TokenBooking`) to a transaction. |
 
 Transaction `status` is `QUEUED`, `<ACTION>` (ONIX acknowledged the request), `ON_<ACTION>` (the callback arrived),
 `NACK` or `ERROR`. There is no Redis: everything the old code kept for 24 h lives in these tables.
@@ -94,3 +94,27 @@ never trigger the Beckn signal receivers. Reschedule detection state is a `Conte
 Tests run inside a Care checkout with the plugin installed (`python manage.py test care_ccn_be`). Framework tests use a
 test-only `EchoFlow` and a loopback that routes Care's outbound ONIX calls into its own receivers, with Celery eager and
 `on_commit` inline, so a whole BAP, ONIX, BPP, ONIX, BAP loop runs synchronously.
+
+## Referrals on Care's `Referral`
+
+The referral flow stores its rows in Care's first-class referral domain, not in `ResourceRequest`.
+
+| Concern | Where it lives |
+|---|---|
+| The referral | `emr.Referral`, tied to a transaction by `ReferralLink(referral, role)`; idempotent on (coordination id, role) |
+| Where it goes | `ReferralAvailability`. A *network* one (`entity_type=external`, `external_entity["beckn"] = {bppId, bppUri, assignedFacilityId?}`) is the Beckn target; a *facility* one receives network referrals and its `care_team` becomes the `assignees` |
+| What `Referral` has no column for | `ReferralLink.details` (`urgency`, `originFacilityId`, `contact`) |
+| Referral type | `consultation` is `CONSULTATION` in `targetCriteria`, `lab` is `INVESTIGATION`; the FE categories map `patient_care` to consultation and everything else to lab |
+| Status | `pending` is DRAFT, `in_progress` is ACTIVE, `completed` is FULFILLED, `cancelled` and `rejected` are CANCELLED |
+
+* **Care to network:** a new pending `Referral` on a network availability whose type is in `BECKN_REFERRAL_TYPES`
+  is sent to that availability's target as a `confirm` (`flows/referral/signals.py`).
+* **Network to Care:** the BPP creates the origin referral on the coordination centre's network availability and
+  the assigned one on the receiving facility's availability (`services/availability.py`).
+* **Patient:** Care requires one, so a payload or BAP request without a patient participant or `patient` /
+  `patientName` is an error callback (BPP) or a failed message (BAP callback).
+* **Authorization:** Care hides `external` availabilities; `authz.BecknReferralAccess` (an override controller that
+  extends `ReferralAccess`) lists and shows public, active network availabilities.
+* **Setup:** `manage.py beckn_referral_availability` creates the network availabilities of the coordination centre
+  (or of `--bpp-id/--bpp-uri`). The API refuses to create `external` availabilities, so the plugin owns them.
+

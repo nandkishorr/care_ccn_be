@@ -59,7 +59,7 @@ select, init, confirm, status, cancel and update are listed in `flows/<flow>/spe
 
 - `status` starts at `QUEUED` and becomes `<ACTION>` only after ONIX ACKs the request, then `ON_<ACTION>` when the
   callback arrives. `NACK` and `ERROR` carry `error`. A missing caller URL is `ERROR` with `error.code = "NOT_CONFIGURED"`.
-- Referral polls also include `resourceRequestId`.
+- Referral polls also include `referralId`, the id of the origin Care `Referral` (it was `resourceRequestId`).
 - `?action=on_x` returns `{transactionId, status, action: "ON_X", ready, data}`. `?action=select` and the other request
   actions return what was sent. For `on_discover`, `data.message.catalogs` holds the catalogs of every responder.
 - Transactions never expire. After the retention purge, payloads return `ready: false`.

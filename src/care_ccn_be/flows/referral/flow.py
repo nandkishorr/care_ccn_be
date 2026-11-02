@@ -52,7 +52,7 @@ class ReferralFlow(BecknFlow):
 
     @classmethod
     def poll_extra(cls, txn) -> dict:
-        return {"resourceRequestId": lifecycle.origin_request_id(txn)}
+        return {"referralId": lifecycle.origin_referral_id(txn)}
 
 
 extensions.register()

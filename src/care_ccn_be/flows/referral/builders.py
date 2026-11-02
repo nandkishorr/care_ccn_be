@@ -1,7 +1,7 @@
 """Contract builders of the referral flow: Care -> network (confirm), the FE-driven BAP requests, BPP callbacks."""
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from care_ccn_be.flows.referral.schema import (
@@ -20,14 +20,22 @@ from care_ccn_be.protocol.actions import (
 from care_ccn_be.protocol.builder import ContractBuilder, Part
 from care_ccn_be.protocol.schema import Contract
 from care_ccn_be.protocol.schema.health import HealthParticipant
+from care_ccn_be.services import availability as availabilities
 from care_ccn_be.services import mappers
 from care_ccn_be.services.identifiers import health_ids_from_patient
 
 PATIENT_ROLE = mappers.PARTICIPANT_ROLE_PATIENT
+CATEGORY_FOR_TYPE = {mappers.REFERRAL_TYPE_CONSULTATION: "patient_care", mappers.REFERRAL_TYPE_LAB: "other"}
+TYPE_FOR_CATEGORY = {"patient_care": mappers.REFERRAL_TYPE_CONSULTATION}
+
+
+def referral_type_for_category(category: str | None) -> str:
+    """The Care referral type for a FE category: patient care is a consultation, anything else a lab referral."""
+    return TYPE_FOR_CATEGORY.get(category or "", mappers.REFERRAL_TYPE_LAB)
 
 
 def service_category_criteria(category: str | None) -> dict[str, Any]:
-    """``targetCriteria`` for a Care category: a consultation for patient care, else an investigation."""
+    """``targetCriteria`` for a category: a consultation for patient care, else an investigation."""
     if category == "patient_care":
         return {
             "serviceCategory": {
@@ -79,23 +87,32 @@ def care_patient_participant(patient, participant_id: str | None = None) -> dict
 # ----------------------------------------------------------------------------- Care -> network confirm
 @dataclass
 class CareReferral:
-    request: Any
+    referral: Any
     coordination_id: str
+    details: dict[str, Any] = field(default_factory=dict)
 
     @property
     def target(self) -> dict[str, Any]:
-        return ((self.request.extensions or {}).get("beckn") or {}).get("target") or {}
+        return availabilities.target_of(self.referral.availability)
+
+    @property
+    def urgency(self) -> str:
+        return self.details.get("urgency") or mappers.URGENCY_ROUTINE
+
+    @property
+    def category(self) -> str:
+        return CATEGORY_FOR_TYPE.get(self.referral.availability.referral_type, "other")
 
     @property
     def origin_facility_id(self) -> str | None:
-        request = self.request
-        return str(request.origin_facility.external_id) if request.origin_facility_id else None
+        """The facility the referral is raised from: the encounter's, else what the link remembers."""
+        referral = self.referral
+        if referral.encounter_id:
+            return str(referral.encounter.facility.external_id)
+        return self.details.get("originFacilityId")
 
     @property
     def assigned_facility_id(self) -> str | None:
-        request = self.request
-        if request.assigned_facility_id:
-            return str(request.assigned_facility.external_id)
         return self.target.get("assignedFacilityId")
 
 
@@ -110,14 +127,14 @@ class CareDescriptorPart(Part):
     field = "descriptor"
 
     def build(self, spec, builder):
-        return {"name": spec.request.title, "shortDesc": spec.request.reason or None}
+        return {"name": spec.referral.title, "shortDesc": spec.referral.note or None}
 
 
 class CareCommitmentsPart(Part):
     field = "commitments"
 
     def build(self, spec, builder):
-        rid = str(spec.request.external_id)
+        rid = str(spec.referral.external_id)
         return [
             {
                 "id": f"commitment-{rid}",
@@ -132,24 +149,22 @@ class CareParticipantsPart(Part):
     field = "participants"
 
     def build(self, spec, builder):
-        request = spec.request
-        return [care_patient_participant(request.related_patient)] if request.related_patient_id else None
+        return [care_patient_participant(spec.referral.patient)]
 
 
 class CareAttributesPart(Part):
-    """The origin facility is ``facilityId`` so the receiver resolves the origin request; the target facility
-    may live only in the other instance, hence it can come from the extension instead of an FK."""
+    """The origin facility is ``facilityId`` so the receiver resolves the origin referral; the target facility
+    lives on the network availability, since it may exist only in the other instance."""
 
     field = "contract_attributes"
 
     def build(self, spec, builder):
-        request = spec.request
         origin, assigned = spec.origin_facility_id, spec.assigned_facility_id
         values = {
             "coordination_id": spec.coordination_id,
             "lifecycle_state": LIFECYCLE_ACTIVE,
-            "clinical_urgency_tier": mappers.urgency_tier(request.emergency, request.priority),
-            "target_criteria": service_category_criteria(request.category),
+            "clinical_urgency_tier": spec.urgency,
+            "target_criteria": service_category_criteria(spec.category),
             "facility_id": origin or assigned,
             "origin_facility_id": origin,
             "assigned_facility_id": assigned,
@@ -250,33 +265,35 @@ def strip_pricing(contract: dict[str, Any]) -> None:
             commitment["offer"].pop("considerations", None)
 
 
-def referral_block(request) -> dict[str, Any]:
+def referral_block(referral, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    details = details or {}
+    urgency = details.get("urgency") or mappers.URGENCY_ROUTINE
     block: dict[str, Any] = {
-        "id": str(request.external_id),
-        "status": request.status,
-        "title": request.title,
-        "reason": request.reason,
-        "emergency": request.emergency,
-        "priority": request.priority,
-        "category": request.category,
+        "id": str(referral.external_id),
+        "status": referral.status,
+        "title": referral.title,
+        "reason": referral.note,
+        "emergency": urgency == mappers.URGENCY_EMERGENCY,
+        "priority": mappers.URGENCY_PRIORITY.get(urgency),
+        "category": CATEGORY_FOR_TYPE.get(referral.availability.referral_type, "other"),
+        "referralType": referral.availability.referral_type,
     }
-    if request.origin_facility_id:
-        block["originFacilityId"] = str(request.origin_facility.external_id)
-    if request.related_patient_id:
-        patient = request.related_patient
-        block["patient"] = {
-            "id": str(patient.external_id),
-            "name": patient.name,
-            "gender": mappers.map_gender_to_nfh(patient.gender),
-        }
-        health_ids = health_ids_from_patient(patient)
-        if health_ids:
-            block["patient"]["healthIds"] = health_ids
+    if details.get("originFacilityId"):
+        block["originFacilityId"] = details["originFacilityId"]
+    patient = referral.patient
+    block["patient"] = {
+        "id": str(patient.external_id),
+        "name": patient.name,
+        "gender": mappers.map_gender_to_nfh(patient.gender),
+    }
+    health_ids = health_ids_from_patient(patient)
+    if health_ids:
+        block["patient"]["healthIds"] = health_ids
     return block
 
 
 class ReferralEcho(ContractBuilder):
-    """BPP callbacks echo the inbound contract and overlay the state of the Care request."""
+    """BPP callbacks echo the inbound contract and overlay the state of the Care referral."""
 
     @classmethod
     def on_select(cls, message: dict[str, Any]) -> dict[str, Any]:
@@ -285,30 +302,32 @@ class ReferralEcho(ContractBuilder):
         return body
 
     @classmethod
-    def overlay(cls, message: dict[str, Any], request, status_code: str | None = None) -> dict[str, Any]:
-        lifecycle = mappers.map_status_to_lifecycle(request.status)
+    def overlay(
+        cls, message: dict[str, Any], referral, details: dict[str, Any] | None = None, status_code: str | None = None
+    ) -> dict[str, Any]:
+        lifecycle = mappers.map_status_to_lifecycle(referral.status)
         body = cls.echo(message, status_code or LIFECYCLE_TO_CONTRACT_STATUS.get(lifecycle, CONTRACT_ACTIVE))
         contract = body["contract"]
-        contract.setdefault("id", str(request.external_id))
+        contract.setdefault("id", str(referral.external_id))
         attributes = contract.setdefault("contractAttributes", {})
         attributes.setdefault("@context", HealthReferral.LD_CONTEXT)
         attributes.setdefault("@type", HealthReferral.LD_TYPE)
         attributes["lifecycleState"] = lifecycle
-        attributes["referral"] = referral_block(request)
+        attributes["referral"] = referral_block(referral, details)
         strip_pricing(contract)
         return body
 
     @classmethod
-    def on_init(cls, message: dict[str, Any], request) -> dict[str, Any]:
-        return cls.overlay(message, request, CONTRACT_DRAFT)
+    def on_init(cls, message: dict[str, Any], referral, details=None) -> dict[str, Any]:
+        return cls.overlay(message, referral, details, CONTRACT_DRAFT)
 
     @classmethod
-    def on_confirm(cls, message: dict[str, Any], request) -> dict[str, Any]:
-        return cls.overlay(message, request, CONTRACT_ACTIVE)
+    def on_confirm(cls, message: dict[str, Any], referral, details=None) -> dict[str, Any]:
+        return cls.overlay(message, referral, details, CONTRACT_ACTIVE)
 
     @classmethod
-    def on_status(cls, message: dict[str, Any], request) -> dict[str, Any]:
-        return cls.overlay(message, request)
+    def on_status(cls, message: dict[str, Any], referral, details=None) -> dict[str, Any]:
+        return cls.overlay(message, referral, details)
 
 
 def completion_message(coordination_id: str) -> dict[str, Any]:

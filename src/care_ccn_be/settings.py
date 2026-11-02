@@ -104,7 +104,9 @@ DEFAULTS = {
     "BECKN_COORDINATOR_TARGET_SERVICE_TYPES": ["CONSULTATION", "INVESTIGATION", "DISPENSING"],
     "BECKN_COORDINATOR_PROGRAMMES": ["PMJAY"],
     "BECKN_COORDINATOR_DISTRICT": "",
-    # referral trigger
+    # referral trigger: Care referral types sent to the network; categories only filter legacy ResourceRequests
+    # during ``beckn_backfill``
+    "BECKN_REFERRAL_TYPES": ["consultation", "lab"],
     "BECKN_REFERRAL_CATEGORIES": ["other", "patient_care", "medicines"],
     "BECKN_REFERRAL_STATUS": "pending",
     # flows, delivery and security

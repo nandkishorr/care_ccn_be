@@ -1,7 +1,8 @@
-from care.emr.models.resource_request import ResourceRequest
+from care.emr.models.referral import Referral
 from django.urls import Resolver404, resolve
 
 from care_ccn_be.flows.referral import lifecycle
+from care_ccn_be.flows.referral.models import ReferralLink
 from care_ccn_be.flows.registry import FlowRegistry
 from care_ccn_be.models import BecknMessage, Direction
 from care_ccn_be.tests.referral.base import ReferralTestBase
@@ -132,15 +133,17 @@ class BAPReceiverTests(ReferralTestBase):
         self.assertEqual(poll["contractId"], "c-1")
         self.assertEqual(poll["routing"]["bppId"], "bpp.remote")
 
-    def test_on_init_creates_the_pending_origin_request(self):
+    def test_on_init_creates_the_pending_origin_referral(self):
         txn_id = self.new_transaction()
-        self.bap(txn_id, "init", {"facility": str(self.origin.external_id), "title": "Heart"})
+        patient = self.create_patient(name="Ravi")
+        body = {"facility": str(self.origin.external_id), "patient": str(patient.external_id), "title": "Heart"}
+        self.bap(txn_id, "init", body)
         self.callback("on_init", txn_id, {"contract": {"id": "c-1", "status": {"code": "DRAFT"}}})
-        request = lifecycle.current(txn_id, lifecycle.ORIGIN)
-        self.assertEqual((request.status, request.title, request.origin_facility), ("pending", "Heart", self.origin))
-        self.assertEqual(self.poll(txn_id)["resourceRequestId"], str(request.external_id))
+        referral = lifecycle.current(txn_id, lifecycle.ORIGIN)
+        self.assertEqual((referral.status, referral.title, referral.patient), ("pending", "Heart", patient))
+        self.assertEqual(self.poll(txn_id)["referralId"], str(referral.external_id))
 
-    def test_on_confirm_creates_the_approved_origin_request_from_the_stored_params(self):
+    def test_on_confirm_creates_the_in_progress_origin_referral_from_the_stored_params(self):
         txn_id = self.new_transaction()
         patient = self.create_patient(name="Ravi")
         body = {
@@ -149,55 +152,93 @@ class BAPReceiverTests(ReferralTestBase):
             "title": "Heart",
             "reason": "pain",
             "category": "patient_care",
+            "emergency": True,
+            "assignedFacilityId": "remote-facility",
         }
         self.bap(txn_id, "confirm", body)
         message = {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}}
         self.callback("on_confirm", txn_id, message)
-        request = ResourceRequest.objects.get()
-        self.assertEqual(request.status, "approved")
-        self.assertEqual((request.title, request.reason, request.category), ("Heart", "pain", "patient_care"))
-        self.assertEqual((request.origin_facility, request.related_patient), (self.origin, patient))
-        self.assertEqual(request.created_by, self.system)
+        referral = Referral.objects.get()
+        self.assertEqual(referral.status, "in_progress")
+        self.assertEqual((referral.title, referral.note, referral.patient), ("Heart", "pain", patient))
+        availability = referral.availability
+        self.assertEqual((availability.entity_type, availability.referral_type), ("external", "consultation"))
+        self.assertEqual(
+            availability.external_entity["beckn"],
+            {"bppId": "bpp.remote", "bppUri": "http://bpp.remote", "assignedFacilityId": "remote-facility"},
+        )
+        self.assertEqual(referral.created_by, self.system)
+        link = ReferralLink.objects.get()
+        self.assertEqual(link.details, {"urgency": "EMERGENCY", "originFacilityId": str(self.origin.external_id)})
 
-    def test_repeated_on_confirm_never_creates_a_second_origin_request(self):
+    def test_a_non_consultation_category_is_a_lab_referral(self):
         txn_id = self.new_transaction()
-        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id)})
+        body = {"facility": str(self.origin.external_id), "patientName": "Asha", "category": "medicines"}
+        self.bap(txn_id, "confirm", body)
+        self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
+        self.assertEqual(Referral.objects.get().availability.referral_type, "lab")
+
+    def test_a_patient_name_creates_the_patient_of_the_origin_referral(self):
+        txn_id = self.new_transaction()
+        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id), "patientName": "Asha Rao"})
+        self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
+        self.assertEqual(Referral.objects.get().patient.name, "Asha Rao")
+
+    def test_repeated_on_confirm_never_creates_a_second_origin_referral(self):
+        txn_id = self.new_transaction()
+        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id), "patientName": "Asha"})
         message = {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}}
         self.callback("on_confirm", txn_id, message, message_id="cb-1")
         self.callback("on_confirm", txn_id, message, message_id="cb-2")
-        self.assertEqual(ResourceRequest.objects.count(), 1)
+        self.assertEqual(Referral.objects.count(), 1)
 
-    def test_on_confirm_approves_the_existing_request(self):
+    def test_on_confirm_approves_the_existing_referral(self):
         txn_id = self.new_transaction()
-        self.bap(txn_id, "init", {"facility": str(self.origin.external_id)})
+        body = {"facility": str(self.origin.external_id), "patientName": "Asha"}
+        self.bap(txn_id, "init", body)
         self.callback("on_init", txn_id, {"contract": {"id": "c-1", "status": {"code": "DRAFT"}}})
-        self.assertEqual(ResourceRequest.objects.get().status, "pending")
-        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id)})
+        self.assertEqual(Referral.objects.get().status, "pending")
+        self.bap(txn_id, "confirm", body)
         self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
-        self.assertEqual(ResourceRequest.objects.get().status, "approved")
+        self.assertEqual(Referral.objects.get().status, "in_progress")
 
     def test_on_confirm_without_a_resolvable_facility_marks_the_message_failed(self):
         txn_id = self.new_transaction()
-        self.bap(txn_id, "confirm", {"facility": "remote-facility"})
+        self.bap(txn_id, "confirm", {"facility": "remote-facility", "patientName": "Asha"})
         self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
-        self.assertFalse(ResourceRequest.objects.exists())
+        self.assertFalse(Referral.objects.exists())
         message = BecknMessage.objects.get(direction=Direction.IN, action="on_confirm")
         self.assertEqual(message.processing_status, "failed")
 
-    def test_error_callbacks_create_nothing(self):
+    def test_on_confirm_without_a_patient_marks_the_message_failed(self):
         txn_id = self.new_transaction()
         self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id)})
+        self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
+        self.assertFalse(Referral.objects.exists())
+        message = BecknMessage.objects.get(direction=Direction.IN, action="on_confirm")
+        self.assertEqual(message.processing_status, "failed")
+
+    def test_passthrough_confirm_keeps_the_patient_for_the_origin_referral(self):
+        txn_id = self.new_transaction()
+        confirm = self.referral_message(facility=self.origin)
+        self.bap(txn_id, "confirm", {"message": confirm})
+        self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
+        self.assertEqual(Referral.objects.get().patient.name, "Asha Rao")
+
+    def test_error_callbacks_create_nothing(self):
+        txn_id = self.new_transaction()
+        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id), "patientName": "Asha"})
         self.callback("on_confirm", txn_id, {"contract": {"status": {"code": "ACTIVE"}}}, error={"code": "X"})
-        self.assertFalse(ResourceRequest.objects.exists())
+        self.assertFalse(Referral.objects.exists())
 
     def test_unknown_transaction_is_nacked(self):
         response = self.callback("on_confirm", "nope", {"contract": {"id": "c"}})
         self.assertEqual(response.json()["message"]["ack"]["status"], "NACK")
 
-    def test_a_completed_callback_completes_the_origin_request(self):
+    def test_a_completed_callback_completes_the_origin_referral(self):
         txn_id = self.new_transaction()
-        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id)})
+        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id), "patientName": "Asha"})
         self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
         message = {"contract": {"status": {"code": "COMPLETED"}, "contractAttributes": {"lifecycleState": "FULFILLED"}}}
         self.callback("on_update", txn_id, message, message_id="cb-3")
-        self.assertEqual(ResourceRequest.objects.get().status, "completed")
+        self.assertEqual(Referral.objects.get().status, "completed")

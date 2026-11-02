@@ -1,4 +1,6 @@
-from care.emr.models.resource_request import ResourceRequest
+from care.emr.models import Encounter
+from care.emr.models.referral import Referral
+from model_bakery import baker
 
 from care_ccn_be.events import booking_fulfilled
 from care_ccn_be.flows.referral import lifecycle
@@ -22,26 +24,27 @@ class ReferralLoopbackTests(ReferralTestBase):
         init = {"facility": origin, "assignedFacilityId": target, "patient": str(patient.external_id), "title": "Heart"}
         self.bap(txn_id, "init", init)
         self.assertEqual(self.bap_txn(txn_id).status, "ON_INIT")
-        self.assertEqual(ResourceRequest.objects.get().status, "pending")
+        self.assertEqual(Referral.objects.get().status, "pending")
 
         self.bap(txn_id, "confirm", init)
         self.assertEqual((self.bap_txn(txn_id).status, self.bpp_txn(txn_id).status), ("ON_CONFIRM", "ON_CONFIRM"))
-        origin_request = lifecycle.current(txn_id, "origin")
-        assigned_request = lifecycle.current(txn_id, "assigned")
-        self.assertEqual((origin_request.status, assigned_request.status), ("approved", "approved"))
-        self.assertNotEqual(origin_request.pk, assigned_request.pk)
-        self.assertEqual(ResourceRequest.objects.count(), 2)
-        self.assertEqual(assigned_request.related_patient.name, "Ravi")
+        origin_referral = lifecycle.current(txn_id, "origin")
+        assigned_referral = lifecycle.current(txn_id, "assigned")
+        self.assertEqual((origin_referral.status, assigned_referral.status), ("in_progress", "in_progress"))
+        self.assertNotEqual(origin_referral.pk, assigned_referral.pk)
+        self.assertEqual(Referral.objects.count(), 2)
+        self.assertEqual(assigned_referral.patient.name, "Ravi")
+        self.assertEqual(assigned_referral.availability.facility, self.target)
 
         self.bap(txn_id, "status")
         self.assertEqual(self.bap_txn(txn_id).status, "ON_STATUS")
         status = self.poll(txn_id, "on_status")["data"]["message"]["contract"]
         self.assertEqual(status["status"]["code"], "ACTIVE")
-        self.assertEqual(status["contractAttributes"]["referral"]["status"], "approved")
+        self.assertEqual(status["contractAttributes"]["referral"]["status"], "in_progress")
 
         poll = self.poll(txn_id)
-        self.assertEqual(poll["resourceRequestId"], str(origin_request.external_id))
-        self.assertEqual(poll["contractId"], str(assigned_request.external_id))
+        self.assertEqual(poll["referralId"], str(origin_referral.external_id))
+        self.assertEqual(poll["contractId"], str(assigned_referral.external_id))
         self.assertEqual(
             poll["actions"],
             [
@@ -64,11 +67,15 @@ class ReferralLoopbackTests(ReferralTestBase):
             ["discover"],
         )
 
-    def test_a_fulfilled_booking_completes_both_requests(self):
+    def test_a_fulfilled_booking_completes_both_referrals(self):
         self.loopback(nack_actions=("discover",))
         txn_id = self.bap().json()["transactionId"]
         self.on_discover(txn_id, bppId="cc.bpp", bppUri="http://cc.bpp")
-        body = {"facility": str(self.origin.external_id), "assignedFacilityId": str(self.target.external_id)}
+        body = {
+            "facility": str(self.origin.external_id),
+            "assignedFacilityId": str(self.target.external_id),
+            "patientName": "Asha",
+        }
         self.bap(txn_id, "confirm", body)
         appointment = BecknTransaction.objects.create(
             transaction_id="appt-1", side=Side.BPP, flow="appointment", coordination_id=txn_id
@@ -76,21 +83,25 @@ class ReferralLoopbackTests(ReferralTestBase):
         booking_fulfilled.send(sender=None, transaction=appointment, booking=None)
         self.assertEqual(lifecycle.current(txn_id, "assigned").status, "completed")
         self.assertEqual(lifecycle.current(txn_id, "origin").status, "completed")
-        self.assertEqual(ResourceRequest.objects.count(), 2)
+        self.assertEqual(Referral.objects.count(), 2)
 
-    def test_a_request_created_in_care_travels_the_whole_loop(self):
+    def test_a_referral_created_in_care_travels_the_whole_loop(self):
         self.loopback()
         patient = self.create_patient(name="Asha", gender="female")
-        request = self.create_request(related_patient=patient, assigned_facility=self.target, extensions={})
+        encounter = baker.make(Encounter, patient=patient, facility=self.origin)
+        referral = self.create_referral(
+            patient=patient, encounter=encounter, availability=self.network_availability(assigned=self.target)
+        )
         from care_ccn_be.flows.referral.tasks import submit_referral
 
-        self.assertEqual(submit_referral(request.pk), "sent")
-        txn_id = str(request.external_id)
+        self.assertEqual(submit_referral(referral.pk), "sent")
+        txn_id = str(referral.external_id)
         self.assertEqual((self.bap_txn(txn_id).status, self.bpp_txn(txn_id).status), ("ON_CONFIRM", "ON_CONFIRM"))
-        request.refresh_from_db()
-        self.assertEqual(request.status, "approved")
-        self.assertEqual(lifecycle.current(txn_id, "origin").pk, request.pk)
+        referral.refresh_from_db()
+        self.assertEqual(referral.status, "in_progress")
+        self.assertEqual(lifecycle.current(txn_id, "origin").pk, referral.pk)
         assigned = lifecycle.current(txn_id, "assigned")
-        self.assertEqual(assigned.assigned_facility, self.target)
-        self.assertEqual(ResourceRequest.objects.count(), 2)
-        self.assertEqual(self.poll(txn_id)["resourceRequestId"], txn_id)
+        self.assertEqual(assigned.availability.facility, self.target)
+        self.assertEqual(assigned.patient.name, "Asha")
+        self.assertEqual(Referral.objects.count(), 2)
+        self.assertEqual(self.poll(txn_id)["referralId"], txn_id)
