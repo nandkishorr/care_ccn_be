@@ -1,6 +1,5 @@
-"""Care extension registrations. The referral target now lives on the network ``ReferralAvailability``
-(``services/availability.py``); the ResourceRequest extension stays registered only so legacy rows that still carry
-``extensions.beckn`` keep validating and serializing."""
+"""Care extension registrations: ``Patient.extensions["beckn"]`` keeps what a network patient carries that Care has
+no column for (``primaryLanguage``, the source participant)."""
 
 from care.emr.extensions.base import ExtensionResource, PlugExtension
 from care.emr.registries.extensions.registry import ExtensionRegistry
@@ -8,22 +7,6 @@ from jsonschema import ValidationError, validate
 
 EXTENSION_NAME = "beckn"
 EXTENSION_VERSION = "1"
-
-RESOURCE_REQUEST_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "target": {
-            "type": "object",
-            "properties": {
-                "bppId": {"type": "string"},
-                "bppUri": {"type": "string"},
-                "assignedFacilityId": {"type": "string"},
-            },
-            "additionalProperties": False,
-        },
-    },
-    "additionalProperties": True,
-}
 
 PATIENT_SCHEMA = {"type": "object", "additionalProperties": True}
 
@@ -50,16 +33,10 @@ class BecknExtension(PlugExtension):
         return data
 
 
-class ResourceRequestBecknExtension(BecknExtension):
-    resource_type = ExtensionResource.resource_request
-    schema = RESOURCE_REQUEST_SCHEMA
-
-
 class PatientBecknExtension(BecknExtension):
     resource_type = ExtensionResource.patient
     schema = PATIENT_SCHEMA
 
 
 def register() -> None:
-    for extension in (ResourceRequestBecknExtension(), PatientBecknExtension()):
-        ExtensionRegistry.register(extension)
+    ExtensionRegistry.register(PatientBecknExtension())
