@@ -2,12 +2,12 @@ from celery import shared_task
 from django.db import transaction
 
 from care_ccn_be import store
-from care_ccn_be.flows.referral import lifecycle
-from care_ccn_be.flows.referral.builders import CareReferral, ReferralCareConfirmBuilder, completion_message
-from care_ccn_be.flows.referral.models import ReferralLink
-from care_ccn_be.flows.registry import FlowRegistry
-from care_ccn_be.models import BecknTransaction, Side
+from care_ccn_be.flows.referral import ReferralFlow
+from care_ccn_be.models import Adapter, BecknTransaction
+from care_ccn_be.models.referral import ReferralLink
+from care_ccn_be.resources.builders.referral import CareReferral, ReferralCareConfirmBuilder, completion_message
 from care_ccn_be.services import availability as availabilities
+from care_ccn_be.services import referral as lifecycle
 
 
 @shared_task(name="care_ccn_be.referral.submit")
@@ -15,7 +15,7 @@ def submit_referral(referral_id: int) -> str:
     """Send a Referral created in Care on a network availability to that target as a confirm."""
     from care.emr.models.referral import Referral
 
-    flow = FlowRegistry.get("referral")
+    flow = ReferralFlow
     referral = (
         Referral.objects.select_related("availability", "patient", "encounter__facility", "created_by")
         .filter(pk=referral_id)
@@ -49,8 +49,8 @@ def submit_referral(referral_id: int) -> str:
 @shared_task(name="care_ccn_be.referral.complete")
 def complete_referral(coordination_id: str) -> str:
     """A fulfilled booking completes the assigned referral and tells the referring side (``on_update``)."""
-    flow = FlowRegistry.get("referral")
-    txn = BecknTransaction.objects.filter(flow=flow.name, side=Side.BPP, coordination_id=coordination_id).first()
+    flow = ReferralFlow
+    txn = BecknTransaction.objects.filter(flow=flow.name, adapter=Adapter.BPP, coordination_id=coordination_id).first()
     if txn is None:
         return "no-referral"
     with transaction.atomic():

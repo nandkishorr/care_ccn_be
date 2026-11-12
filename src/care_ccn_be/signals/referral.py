@@ -8,14 +8,14 @@ from django.dispatch import receiver
 
 from care_ccn_be.context_vars import beckn_signals_suppressed
 from care_ccn_be.events import booking_fulfilled
-from care_ccn_be.flows.referral.tasks import complete_referral, submit_referral
-from care_ccn_be.flows.registry import FlowRegistry
+from care_ccn_be.flows.lookup import is_flow_enabled
 from care_ccn_be.services import availability as availabilities
 from care_ccn_be.settings import plugin_settings
+from care_ccn_be.tasks.referral import complete_referral, submit_referral
 
 
 def active() -> bool:
-    return FlowRegistry.is_enabled("referral") and not beckn_signals_suppressed()
+    return is_flow_enabled("referral") and not beckn_signals_suppressed()
 
 
 @receiver(post_save, sender=Referral, dispatch_uid="care_ccn_be.referral.referral_saved")
@@ -37,5 +37,5 @@ def referral_saved(sender, instance, created, **kwargs):
 def booking_fulfilled_received(sender, **kwargs):
     txn = kwargs.get("transaction")
     coordination_id = getattr(txn, "coordination_id", "")
-    if coordination_id and FlowRegistry.is_enabled("referral"):
+    if coordination_id and is_flow_enabled("referral"):
         transaction.on_commit(lambda: complete_referral.delay(coordination_id))

@@ -1,4 +1,7 @@
-"""Celery tasks. Every send is persisted first (``store.record_outbound``) and delivered here after commit."""
+"""Shared Celery tasks; flow tasks live in the appointment and referral modules.
+
+Every send is persisted first (``store.record_outbound``) and delivered here after commit.
+"""
 
 import logging
 from datetime import timedelta
@@ -7,8 +10,8 @@ from celery import Task, current_app, shared_task
 from celery.schedules import crontab
 from django.db import transaction
 
-from care_ccn_be import store
-from care_ccn_be.models import BecknMessage, Delivery, Processing, Side
+from care_ccn_be import adapter, store
+from care_ccn_be.models import Adapter, BecknMessage, Delivery, Processing
 from care_ccn_be.protocol.client import BecknClient, TransportError
 from care_ccn_be.settings import plugin_settings
 
@@ -26,11 +29,14 @@ class DeliveryTask(Task):
 
 
 def caller_url(msg: BecknMessage) -> str:
-    """A BPP-side transaction (and every ``catalog/publish``) sends through the BPP caller."""
+    """``catalog/publish`` goes to the adapter's publish module; a BPP-side transaction sends through the BPP
+    caller, everything else through the BAP caller."""
+    if msg.action == adapter.CATALOG_PUBLISH:
+        return adapter.catalog_publish_base()
     txn = msg.transaction
-    if msg.action == "catalog/publish" or (txn is not None and txn.side == Side.BPP):
-        return plugin_settings.BECKN_BPP_CALLER_URL
-    return plugin_settings.BECKN_BAP_CALLER_URL
+    if txn is not None and txn.adapter == Adapter.BPP:
+        return adapter.bpp_caller_url()
+    return adapter.bap_caller_url()
 
 
 @shared_task(
@@ -60,7 +66,7 @@ def deliver_beckn_message(self, message_pk: int) -> str:
 @shared_task(name="care_ccn_be.process_bpp_request")
 def process_bpp_request(message_pk: int) -> str:
     """Run the BPP service for one stored inbound request and queue its callback."""
-    from care_ccn_be.bpp.service import process_inbound
+    from care_ccn_be.api.viewsets.base import process_inbound
 
     try:
         return process_inbound(message_pk)
@@ -73,7 +79,7 @@ def process_bpp_request(message_pk: int) -> str:
 @shared_task(name="care_ccn_be.process_bap_callback")
 def process_bap_callback(message_pk: int) -> str:
     """Apply one stored inbound ``on_*`` callback to its BAP transaction and run its flow hook."""
-    from care_ccn_be.bap.receiver import process_callback
+    from care_ccn_be.api.viewsets.base import process_callback
 
     try:
         return process_callback(message_pk)
@@ -96,7 +102,7 @@ def requeue_stuck_messages() -> int:
         txn = msg.transaction
         if txn is None:
             continue
-        task = process_bpp_request if txn.side == Side.BPP else process_bap_callback
+        task = process_bpp_request if txn.adapter == Adapter.BPP else process_bap_callback
         task.apply_async(args=[msg.pk], queue=plugin_settings.BECKN_CELERY_QUEUE or None)
         count += 1
     return count

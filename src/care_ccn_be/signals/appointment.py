@@ -7,18 +7,18 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 from care_ccn_be import events
+from care_ccn_be.constants import NOTIFY_BOOKING_STATUSES
 from care_ccn_be.context_vars import beckn_signals_suppressed, pop_reschedule, remember_reschedule
-from care_ccn_be.flows.appointment.constants import NOTIFY_BOOKING_STATUSES
-from care_ccn_be.flows.appointment.models import AppointmentLink
-from care_ccn_be.flows.appointment.tasks import send_appointment_update
-from care_ccn_be.flows.registry import FlowRegistry
+from care_ccn_be.flows.lookup import is_flow_enabled
+from care_ccn_be.models.appointment import AppointmentLink
+from care_ccn_be.tasks.appointment import send_appointment_update
 
 RESCHEDULED = "rescheduled"
 FULFILLED = "fulfilled"
 
 
 def active() -> bool:
-    return FlowRegistry.is_enabled("appointment") and not beckn_signals_suppressed()
+    return is_flow_enabled("appointment") and not beckn_signals_suppressed()
 
 
 def active_link(booking_id) -> AppointmentLink | None:
