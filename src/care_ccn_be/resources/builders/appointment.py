@@ -5,20 +5,25 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, ClassVar
 
-from care_ccn_be.flows.appointment.constants import (
+from care_ccn_be.constants import (
     CANCELLED_BOOKING_STATUSES,
     COMPLETED_BOOKING_STATUSES,
     DEFAULT_SERVICE_TYPE,
     PENDING_BOOKING_STATUSES,
 )
-from care_ccn_be.flows.appointment.schema import PATIENT, AppointmentContract
 from care_ccn_be.protocol.actions import CONTRACT_ACTIVE, CONTRACT_CANCELLED, CONTRACT_COMPLETED, CONTRACT_DRAFT
 from care_ccn_be.protocol.builder import ContractBuilder, Part
-from care_ccn_be.protocol.schema import Commitment, Descriptor, Offer, Participant, Performance, Quantity, Resource
-from care_ccn_be.protocol.schema import Status as StatusModel
-from care_ccn_be.protocol.schema.health import HealthContract, HealthId, HealthParticipant, HealthPerformance
+from care_ccn_be.resources.appointment.schema import PATIENT, AppointmentContract
+from care_ccn_be.resources.beckn import Commitment, Descriptor, Offer, Participant, Performance, Quantity, Resource
+from care_ccn_be.resources.beckn import Status as StatusModel
+from care_ccn_be.resources.beckn.health import HealthContract, HealthId, HealthParticipant, HealthPerformance
 
 ABHA_SYSTEM = "ABHA"
+
+
+class AppointmentContractBuilder(ContractBuilder):
+    contract_model = AppointmentContract
+    status_code = ""
 
 
 @dataclass
@@ -84,19 +89,16 @@ class PatientParticipantPart(Part):
         patient = spec.patient
         if patient is None:
             return None
-        attributes: dict[str, Any] = {"participant_role": PATIENT}
-        if patient.language:
-            attributes["primary_language"] = patient.language
-        if patient.gender:
-            attributes["gender"] = patient.gender
-        if patient.dob:
-            attributes["date_of_birth"] = patient.dob
-        if patient.abha:
-            attributes["health_ids"] = [HealthId(system=ABHA_SYSTEM, value=patient.abha)]
         return [
             Participant(
                 descriptor=Descriptor(name=patient.name, short_desc="Patient (Subject)"),
-                participant_attributes=HealthParticipant(**attributes),
+                participant_attributes=HealthParticipant(
+                    participant_role=PATIENT,
+                    primary_language=patient.language or None,
+                    gender=patient.gender or None,
+                    date_of_birth=patient.dob,
+                    health_ids=[HealthId(system=ABHA_SYSTEM, value=patient.abha)] if patient.abha else None,
+                ),
             )
         ]
 
@@ -142,12 +144,11 @@ class HealthContractPart(Part):
     field = "contract_attributes"
 
     def build(self, spec, builder):
-        extras = {}
-        if spec.coordination_ref:
-            extras["coordinationRef"] = spec.coordination_ref
-        if spec.cancellation_reason:
-            extras["cancellationReason"] = spec.cancellation_reason
-        return HealthContract(health_service_type=spec.service_type, **extras)
+        return HealthContract(
+            health_service_type=spec.service_type,
+            coordination_ref=spec.coordination_ref or None,
+            cancellation_reason=spec.cancellation_reason or None,
+        )
 
 
 class AppointmentSelectBuilder(ContractBuilder):
@@ -195,17 +196,15 @@ def booking_contract_status(booking) -> str:
 
 def slot_performance(slot, service_type: str, confirmed: bool = False) -> dict[str, Any]:
     """A ``TokenSlot`` as a performance entry; ``confirmed`` also stamps the confirmed appointment time."""
-    performance = Performance(
+    return Performance(
         id=str(slot.external_id),
         performance_attributes=HealthPerformance(
             health_service_type=service_type,
             appointment_window_start=slot.start_datetime,
             appointment_window_end=slot.end_datetime,
+            confirmed_appointment_time=slot.start_datetime if confirmed else None,
         ),
     ).dump()
-    if confirmed:
-        performance["performanceAttributes"]["confirmedAppointmentTime"] = slot.start_datetime.isoformat()
-    return performance
 
 
 def service_type_of(message: dict[str, Any], default: str = DEFAULT_SERVICE_TYPE) -> str:
