@@ -7,7 +7,9 @@ from django.core.signals import setting_changed
 from django.dispatch import receiver
 from rest_framework.settings import perform_import
 
+from care_ccn_be.adapter import DEFAULTS as ADAPTER_DEFAULTS
 from care_ccn_be.apps import PLUGIN_NAME
+from care_ccn_be.flows.defaults import REFERRAL_DEFAULTS
 
 env = environ.Env()
 
@@ -89,26 +91,9 @@ DEFAULTS = {
     # identity and network
     "BECKN_NETWORK_ID": "",
     "BECKN_VERSION": "2.0.0",
-    "BECKN_BAP_ID": "",
-    "BECKN_BAP_URI": "",
-    "BECKN_BAP_CALLER_URL": "",
-    "BECKN_BPP_ID": "",
-    "BECKN_BPP_URI": "",
-    "BECKN_BPP_CALLER_URL": "",
-    "BECKN_CC_BPP_ID": "",
-    "BECKN_CC_BPP_URI": "",
+    **ADAPTER_DEFAULTS,
     "BECKN_SYSTEM_USERNAME": "beckn_system",
-    # coordinator catalog
-    "BECKN_COORDINATOR_NAME": "Care Coordination Desk",
-    "BECKN_COORDINATOR_ID": "",
-    "BECKN_COORDINATOR_TARGET_SERVICE_TYPES": ["CONSULTATION", "INVESTIGATION", "DISPENSING"],
-    "BECKN_COORDINATOR_PROGRAMMES": ["PMJAY"],
-    "BECKN_COORDINATOR_DISTRICT": "",
-    # referral trigger: Care referral types sent to the network; categories only filter legacy ResourceRequests
-    # during ``beckn_backfill``
-    "BECKN_REFERRAL_TYPES": ["consultation", "lab"],
-    "BECKN_REFERRAL_CATEGORIES": ["other", "patient_care", "medicines"],
-    "BECKN_REFERRAL_STATUS": "pending",
+    **REFERRAL_DEFAULTS,
     # flows, delivery and security
     "BECKN_ENABLED_FLOWS": ["referral", "appointment"],
     "BECKN_HTTP_TIMEOUT": 10,
