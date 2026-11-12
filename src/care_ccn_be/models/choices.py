@@ -1,7 +1,7 @@
 from django.db import models
 
 
-class Side(models.TextChoices):
+class Adapter(models.TextChoices):
     BAP = "bap"
     BPP = "bpp"
 

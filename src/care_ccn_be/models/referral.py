@@ -19,9 +19,6 @@ class ReferralLink(BecknLink):
     referral = models.ForeignKey("emr.Referral", on_delete=models.CASCADE, related_name="+")
     role = models.CharField(max_length=10, choices=ReferralRole.choices)
     details = models.JSONField(default=dict, blank=True)
-    legacy_resource_request = models.ForeignKey(
-        "emr.ResourceRequest", null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
-    )
 
     class Meta:
         app_label = "care_ccn_be"

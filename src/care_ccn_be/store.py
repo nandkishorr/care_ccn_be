@@ -11,7 +11,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 
-from care_ccn_be.models import BecknMessage, BecknTransaction, Delivery, Direction, Processing, Side, TxnStatus
+from care_ccn_be.models import Adapter, BecknMessage, BecknTransaction, Delivery, Direction, Processing, TxnStatus
 from care_ccn_be.protocol.actions import STATUS, UPDATE, callback_of, is_callback, request_of
 from care_ccn_be.protocol.client import ACK, SKIPPED, AckResult
 from care_ccn_be.protocol.context import clean_overrides, extract_routing
@@ -27,7 +27,7 @@ def open_bap_transaction(
 ) -> BecknTransaction:
     return BecknTransaction.objects.create(
         transaction_id=transaction_id or str(uuid.uuid4()),
-        side=Side.BAP,
+        adapter=Adapter.BAP,
         flow=flow.name,
         coordination_id=coordination_id,
         created_by=user if getattr(user, "pk", None) else None,
@@ -39,18 +39,18 @@ def lock(txn: BecknTransaction) -> BecknTransaction:
 
 
 def find_bap_transaction(transaction_id: str) -> BecknTransaction | None:
-    return BecknTransaction.objects.filter(transaction_id=transaction_id, side=Side.BAP).first()
+    return BecknTransaction.objects.filter(transaction_id=transaction_id, adapter=Adapter.BAP).first()
 
 
 def find_bpp_transaction(transaction_id: str) -> BecknTransaction | None:
-    return BecknTransaction.objects.filter(transaction_id=transaction_id, side=Side.BPP).first()
+    return BecknTransaction.objects.filter(transaction_id=transaction_id, adapter=Adapter.BPP).first()
 
 
 def open_bpp_transaction(flow, request) -> BecknTransaction:
     context = request.context
     txn, _ = BecknTransaction.objects.get_or_create(
         transaction_id=context.transaction_id,
-        side=Side.BPP,
+        adapter=Adapter.BPP,
         defaults={
             "flow": flow.name,
             "network_id": context.network_id or "",
@@ -94,8 +94,8 @@ def payload_hash(data: Any) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
-def inbound_sender(context: dict, side: str, payload: Any = None) -> str:
-    if side == Side.BPP:
+def inbound_sender(context: dict, adapter: str, payload: Any = None) -> str:
+    if adapter == Adapter.BPP:
         return context.get("bapId") or context.get("bapUri") or ""
     return context.get("bppId") or context.get("bppUri") or payload_hash(payload)
 
@@ -129,15 +129,15 @@ def record_inbound(
             )
     except IntegrityError:  # a concurrent retry won the race: answer with what is stored
         return find_inbound(context, action, sender_id)
-    if txn is not None and txn.side == Side.BPP:
+    if txn is not None and txn.adapter == Adapter.BPP:
         update_transaction(txn, status=action.upper(), status_message_id=msg.message_id)
     return msg
 
 
-def record_nack(payload: dict, action: str, nack_body: dict, side: str) -> dict:
+def record_nack(payload: dict, action: str, nack_body: dict, adapter: str) -> dict:
     context = payload.get("context") if isinstance(payload, dict) else None
     context = context if isinstance(context, dict) else {}
-    sender = inbound_sender(context, side, payload)
+    sender = inbound_sender(context, adapter, payload)
     if find_inbound(context, action, sender) is None:
         record_inbound(None, payload if isinstance(payload, dict) else {}, action, nack_body, sender, Processing.FAILED)
     return nack_body
@@ -177,7 +177,7 @@ def record_outbound(
         reply_to=reply_to,
         delivery_status=Delivery.QUEUED,
     )
-    if txn is not None and txn.side == Side.BAP and not is_callback(msg.action):
+    if txn is not None and txn.adapter == Adapter.BAP and not is_callback(msg.action):
         update_transaction(
             txn,
             status=TxnStatus.QUEUED,
@@ -199,12 +199,12 @@ def record_unsolicited(
 
 
 def record_error_callback(message_pk: int, code: str, text: str) -> BecknMessage | None:
-    from care_ccn_be.flows.registry import FlowRegistry
+    from care_ccn_be.flows.lookup import get_flow
 
     msg = BecknMessage.objects.select_related("transaction").filter(pk=message_pk).first()
     if msg is None or msg.transaction is None:
         return None
-    flow = FlowRegistry.get(msg.transaction.flow)
+    flow = get_flow(msg.transaction.flow)
     payload = msg.payload
     context = flow.context().callback(payload.get("context") or {}, msg.action)
     error = {"type": "DOMAIN-ERROR", "code": code, "message": text}
@@ -242,7 +242,7 @@ def apply_delivery(msg: BecknMessage, result: AckResult) -> None:
     if result.result == SKIPPED:
         msg.delivery_status = Delivery.SKIPPED
         msg.last_error = result.detail.get("reason", "")
-        if txn is not None and txn.side == Side.BAP and _owns_status(txn, msg):
+        if txn is not None and txn.adapter == Adapter.BAP and _owns_status(txn, msg):
             update_transaction(
                 txn, status=TxnStatus.ERROR, last_error={"code": "NOT_CONFIGURED", "message": msg.last_error}
             )
@@ -250,9 +250,9 @@ def apply_delivery(msg: BecknMessage, result: AckResult) -> None:
         msg.delivery_status = Delivery.ACKED
         msg.ack = result.detail.get("body") if isinstance(result.detail.get("body"), dict) else result.detail
         if txn is not None and _owns_status(txn, msg):
-            if txn.side == Side.BAP and txn.status == TxnStatus.QUEUED:
+            if txn.adapter == Adapter.BAP and txn.status == TxnStatus.QUEUED:
                 update_transaction(txn, status=msg.action.upper())
-            elif txn.side == Side.BPP and is_callback(msg.action):
+            elif txn.adapter == Adapter.BPP and is_callback(msg.action):
                 update_transaction(txn, status=msg.action.upper())
     else:
         msg.delivery_status = Delivery.NACKED
@@ -342,39 +342,3 @@ def purge_messages(days: int) -> int:
         return 0
     deleted, _ = BecknMessage.objects.filter(created_date__lt=timezone.now() - timedelta(days=days)).delete()
     return deleted
-
-
-# ----------------------------------------------------------------------------- backfill (idempotent imports)
-def backfill_transaction(
-    transaction_id: str, side: str, flow: str, source: str, **fields: Any
-) -> tuple[BecknTransaction, bool]:
-    state = {"v": 1, "legacy": {"source": source, "at": timezone.now().isoformat()}, **fields.pop("state", {})}
-    return BecknTransaction.objects.get_or_create(
-        transaction_id=transaction_id,
-        side=side,
-        defaults={"flow": flow, "state": state, **fields},
-    )
-
-
-def backfill_message(
-    txn: BecknTransaction,
-    message_id: str,
-    action: str,
-    direction: str,
-    payload: dict,
-    sender_id: str = "",
-    delivery_status: str = "",
-    processing_status: str = "",
-) -> tuple[BecknMessage, bool]:
-    return BecknMessage.objects.get_or_create(
-        message_id=message_id,
-        action=action,
-        direction=direction,
-        sender_id=sender_id,
-        defaults={
-            "transaction": txn,
-            "payload": payload,
-            "delivery_status": delivery_status,
-            "processing_status": processing_status,
-        },
-    )

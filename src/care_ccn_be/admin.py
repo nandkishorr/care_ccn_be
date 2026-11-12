@@ -29,8 +29,8 @@ class ReadOnlyAdmin(admin.ModelAdmin):
 
 @admin.register(BecknTransaction)
 class BecknTransactionAdmin(ReadOnlyAdmin):
-    list_display = ("transaction_id", "flow", "side", "status", "counterparty_id", "created_date")
-    list_filter = ("flow", "side", "status")
+    list_display = ("transaction_id", "flow", "adapter", "status", "counterparty_id", "created_date")
+    list_filter = ("flow", "adapter", "status")
     search_fields = ("transaction_id", "contract_id", "coordination_id")
     inlines = [BecknMessageInline]
 

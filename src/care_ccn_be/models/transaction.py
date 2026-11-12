@@ -2,14 +2,14 @@ from care.utils.models.base import BaseModel
 from django.conf import settings
 from django.db import models
 
-from care_ccn_be.models.choices import Side, TxnStatus
+from care_ccn_be.models.choices import Adapter, TxnStatus
 
 
 class BecknTransaction(BaseModel):
-    """One row per (transaction_id, side); a loopback exchange has a BAP row and a BPP row."""
+    """One row per (transaction_id, adapter); a loopback exchange has a BAP row and a BPP row."""
 
     transaction_id = models.CharField(max_length=255)
-    side = models.CharField(max_length=3, choices=Side.choices)
+    adapter = models.CharField(max_length=3, choices=Adapter.choices)
     flow = models.CharField(max_length=50)
     status = models.CharField(max_length=30, default=TxnStatus.QUEUED)
     status_message_id = models.CharField(max_length=255, blank=True)
@@ -29,8 +29,8 @@ class BecknTransaction(BaseModel):
     )
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["transaction_id", "side"], name="beckn_txn_side_unique")]
-        indexes = [models.Index(fields=["flow", "side", "status"])]
+        constraints = [models.UniqueConstraint(fields=["transaction_id", "adapter"], name="beckn_txn_adapter_unique")]
+        indexes = [models.Index(fields=["flow", "adapter", "status"])]
 
     def __str__(self):
-        return f"{self.flow}/{self.side}/{self.transaction_id}"
+        return f"{self.flow}/{self.adapter}/{self.transaction_id}"
