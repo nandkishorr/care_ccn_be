@@ -2,8 +2,8 @@
 
 from typing import Any, Generic, TypeVar
 
-from care_ccn_be.protocol.schema.base import BecknModel, IsoDateTime
-from care_ccn_be.protocol.schema.core import Contract
+from care_ccn_be.resources.beckn.base import BecknModel, IsoDateTime
+from care_ccn_be.resources.beckn.core import Catalog, Contract
 
 C = TypeVar("C", bound=Contract)
 M = TypeVar("M", bound=BecknModel)
@@ -47,12 +47,24 @@ class InboundMessage(BecknModel):
     contract: Contract | None = None
 
 
+class CatalogFilter(BecknModel):
+    """``intent.filters``: an ONIX JSONPath expression over ``$.catalogs``."""
+
+    type: str = "jsonpath"
+    expression: str | None = None
+
+
+class Intent(BecknModel):
+    text_search: str | None = None
+    filters: CatalogFilter | None = None
+
+
 class DiscoverMessage(BecknModel):
-    intent: dict[str, Any] = {}
+    intent: Intent = Intent()
 
 
 class CatalogMessage(BecknModel):
-    catalogs: list[dict[str, Any]] = []
+    catalogs: list[Catalog] = []
 
 
 class BecknRequest(BecknModel, Generic[M]):

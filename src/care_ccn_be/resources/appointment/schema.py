@@ -1,12 +1,20 @@
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime
+from typing import Annotated, Any
 
-from pydantic import model_validator
+from pydantic import BeforeValidator, Field, model_validator
 
-from care_ccn_be.protocol.schema import BecknRequest, Contract, ContractMessage, Participant
-from care_ccn_be.protocol.schema.health import HealthContract, HealthPerformance
+from care_ccn_be.resources.beckn import BecknModel, BecknRequest, Contract, ContractMessage, Participant
+from care_ccn_be.resources.beckn.codes import ParticipantRole
+from care_ccn_be.resources.beckn.health import HealthContract, HealthPerformance
 
-PATIENT = "PATIENT"
+PATIENT = ParticipantRole.PATIENT
+
+
+def _day_part(value: Any) -> Any:
+    return value[:10] if isinstance(value, str) else value
+
+
+RequestedDay = Annotated[date, BeforeValidator(_day_part)]
 
 
 class AppointmentContract(Contract):
@@ -37,19 +45,21 @@ class AppointmentContract(Contract):
         return None, None
 
     @property
-    def service_type(self) -> str | None:
-        return getattr(self.contract_attributes, "health_service_type", None)
+    def health_contract(self) -> HealthContract:
+        attributes = self.contract_attributes
+        return attributes if isinstance(attributes, HealthContract) else HealthContract()
 
-    def attribute_extra(self, key: str) -> Any:
-        return (getattr(self.contract_attributes, "model_extra", None) or {}).get(key)
+    @property
+    def service_type(self) -> str | None:
+        return self.health_contract.health_service_type
 
     @property
     def coordination_ref(self) -> str:
-        return str(self.attribute_extra("coordinationRef") or "")
+        return self.health_contract.coordination_ref or ""
 
     @property
     def cancellation_reason(self) -> str | None:
-        return self.attribute_extra("cancellationReason")
+        return self.health_contract.cancellation_reason
 
     @model_validator(mode="after")
     def _health_contract(self):
@@ -60,6 +70,21 @@ class AppointmentContract(Contract):
 
 class AppointmentMessage(ContractMessage[AppointmentContract]):
     pass
+
+
+class SelectIntent(BecknModel):
+    """Care extension on ``select``: the day whose slots are wanted (``preferredDate``, or ``date``)."""
+
+    preferred_date: RequestedDay | None = None
+    on_date: RequestedDay | None = Field(default=None, alias="date")
+
+    @property
+    def day(self) -> date | None:
+        return self.preferred_date or self.on_date
+
+
+class AppointmentSelectMessage(AppointmentMessage):
+    intent: SelectIntent | None = None
 
 
 class AppointmentInitMessage(AppointmentMessage):
@@ -82,5 +107,6 @@ class AppointmentConfirmMessage(AppointmentInitMessage):
 
 
 AppointmentRequest = BecknRequest[AppointmentMessage]
+AppointmentSelectRequest = BecknRequest[AppointmentSelectMessage]
 AppointmentInitRequest = BecknRequest[AppointmentInitMessage]
 AppointmentConfirmRequest = BecknRequest[AppointmentConfirmMessage]

@@ -1,5 +1,6 @@
-from care_ccn_be.protocol.schema.base import ATTRIBUTES, Attributes, BecknModel, IsoDateTime, JsonLdModel
-from care_ccn_be.protocol.schema.core import (
+from care_ccn_be.resources.beckn.base import ATTRIBUTES, Attributes, BecknModel, IsoDateTime, JsonLdModel
+from care_ccn_be.resources.beckn.core import (
+    Catalog,
     Commitment,
     Consideration,
     Contract,
@@ -12,19 +13,22 @@ from care_ccn_be.protocol.schema.core import (
     Participant,
     Performance,
     Price,
+    Provider,
     Quantity,
     Resource,
     Status,
 )
-from care_ccn_be.protocol.schema.envelope import (
+from care_ccn_be.resources.beckn.envelope import (
     BecknContext,
     BecknRequest,
     CatalogContext,
+    CatalogFilter,
     CatalogMessage,
     ContractMessage,
     DiscoverMessage,
     ErrorBlock,
     InboundMessage,
+    Intent,
     contract_attributes,
 )
 
@@ -34,7 +38,9 @@ __all__ = [
     "BecknContext",
     "BecknModel",
     "BecknRequest",
+    "Catalog",
     "CatalogContext",
+    "CatalogFilter",
     "CatalogMessage",
     "Commitment",
     "Consideration",
@@ -48,12 +54,14 @@ __all__ = [
     "HasParticipants",
     "HasPerformance",
     "InboundMessage",
+    "Intent",
     "IsoDateTime",
     "JsonLdModel",
     "Offer",
     "Participant",
     "Performance",
     "Price",
+    "Provider",
     "Quantity",
     "Resource",
     "Status",

@@ -3,8 +3,8 @@
 import copy
 from typing import Any, ClassVar
 
-from care_ccn_be.protocol.schema.core import Contract
-from care_ccn_be.protocol.schema.envelope import ContractMessage
+from care_ccn_be.resources.beckn.core import Contract
+from care_ccn_be.resources.beckn.envelope import ContractMessage
 
 
 class Part:

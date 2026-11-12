@@ -1,6 +1,6 @@
 """Core Beckn v2 objects. A contract is assembled from small ``Has*`` parts."""
 
-from care_ccn_be.protocol.schema.base import Attributes, BecknModel
+from care_ccn_be.resources.beckn.base import Attributes, BecknModel
 
 
 class Descriptor(BecknModel):
@@ -25,12 +25,14 @@ class Price(BecknModel):
 
 class Resource(BecknModel):
     id: str
+    descriptor: Descriptor | None = None
     quantity: Quantity | None = None
     resource_attributes: Attributes | None = None
 
 
 class Offer(BecknModel):
     id: str
+    descriptor: Descriptor | None = None
     resource_ids: list[str] = []
     offer_attributes: Attributes | None = None
 
@@ -87,3 +89,22 @@ class Contract(HasCommitments, HasParticipants, HasPerformance):
     descriptor: Descriptor | None = None
     status: Status | None = None
     contract_attributes: Attributes | None = None
+
+
+class Provider(BecknModel):
+    id: str
+    descriptor: Descriptor | None = None
+
+
+class Catalog(BecknModel):
+    """One entry of ``message.catalogs`` (``on_discover`` and ``catalog/publish``)."""
+
+    id: str
+    descriptor: Descriptor | None = None
+    provider: Provider | None = None
+    bpp_id: str | None = None
+    bpp_uri: str | None = None
+    bap_id: str | None = None
+    bap_uri: str | None = None
+    resources: list[Resource] = []
+    offers: list[Offer] = []
