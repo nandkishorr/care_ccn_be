@@ -1,4 +1,4 @@
-"""Publish a flow's catalog to the network as a ``catalog/publish`` message (delivered through the BPP caller)."""
+"""Publish a flow's catalog to the network: a ``catalog/publish`` message for the ONIX ``catalogPublish`` module."""
 
 from dataclasses import dataclass, field
 from typing import Any
