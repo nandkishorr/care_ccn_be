@@ -7,10 +7,10 @@ from model_bakery import baker
 
 from care_ccn_be.context_vars import suppress_beckn_signals
 from care_ccn_be.events import booking_fulfilled
-from care_ccn_be.flows.referral import lifecycle
-from care_ccn_be.flows.referral.models import ReferralLink
-from care_ccn_be.models import BecknMessage, BecknTransaction, Direction, Side
+from care_ccn_be.models import Adapter, BecknMessage, BecknTransaction, Direction
+from care_ccn_be.models.referral import ReferralLink
 from care_ccn_be.services import availability as availabilities
+from care_ccn_be.services import referral as lifecycle
 from care_ccn_be.tests.framework.base import PLUGIN
 from care_ccn_be.tests.referral.base import CC, REFERRAL_PLUGIN, ReferralTestBase
 
@@ -42,7 +42,7 @@ class ReferralSignalTests(ReferralTestBase):
         contract = payload["message"]["contract"]
         self.assertEqual(contract["contractAttributes"]["coordinationId"], str(referral.external_id))
         self.assertEqual(contract["descriptor"], {"name": "Heart", "shortDesc": "pain"})
-        txn = BecknTransaction.objects.get(side=Side.BAP)
+        txn = BecknTransaction.objects.get(adapter=Adapter.BAP)
         self.assertEqual((txn.flow, txn.coordination_id), ("referral", str(referral.external_id)))
         self.assertEqual(ReferralLink.objects.get().role, "origin")
         self.assertEqual(lifecycle.current(str(referral.external_id), "origin"), referral)
@@ -90,21 +90,21 @@ class ReferralSignalTests(ReferralTestBase):
         self.assertEqual(self.sent, [])
 
     def test_the_task_is_idempotent(self):
-        from care_ccn_be.flows.referral.tasks import submit_referral
+        from care_ccn_be.tasks.referral import submit_referral
 
         referral = self.make()
         self.assertEqual(submit_referral(referral.pk), "skipped")
         self.assertEqual(BecknTransaction.objects.count(), 1)
 
     def test_the_task_skips_referrals_that_are_not_for_the_network(self):
-        from care_ccn_be.flows.referral.tasks import submit_referral
+        from care_ccn_be.tasks.referral import submit_referral
 
         referral = self.create_referral(availability=availabilities.for_facility(self.target))
         self.assertEqual(submit_referral(referral.pk), "skipped")
         self.assertFalse(BecknTransaction.objects.exists())
 
     def test_a_deleted_referral_is_skipped(self):
-        from care_ccn_be.flows.referral.tasks import submit_referral
+        from care_ccn_be.tasks.referral import submit_referral
 
         self.assertEqual(submit_referral(0), "skipped")
 
@@ -116,7 +116,7 @@ class BookingFulfilledTests(ReferralTestBase):
         self.request("confirm", "coord-1", self.referral_message(facility=self.origin, assigned=self.target))
         self.sent.clear()
         self.appointment_txn = BecknTransaction.objects.create(
-            transaction_id="appt-1", side=Side.BPP, flow="appointment", coordination_id="coord-1"
+            transaction_id="appt-1", adapter=Adapter.BPP, flow="appointment", coordination_id="coord-1"
         )
 
     def fulfil(self, txn=None):
@@ -132,7 +132,7 @@ class BookingFulfilledTests(ReferralTestBase):
         self.assertEqual(payload["message"]["contract"]["contractAttributes"]["lifecycleState"], "FULFILLED")
 
     def test_it_is_a_no_op_without_a_coordination_reference(self):
-        txn = BecknTransaction.objects.create(transaction_id="appt-2", side=Side.BPP, flow="appointment")
+        txn = BecknTransaction.objects.create(transaction_id="appt-2", adapter=Adapter.BPP, flow="appointment")
         self.fulfil(txn)
         self.assertEqual(self.sent, [])
         self.assertEqual(lifecycle.current("coord-1", "assigned").status, "in_progress")
@@ -149,7 +149,7 @@ class BookingFulfilledTests(ReferralTestBase):
         self.assertEqual(BecknMessage.objects.filter(direction=Direction.OUT, action="on_update").count(), 1)
 
     def test_without_return_routing_the_referral_completes_but_nothing_is_sent(self):
-        BecknTransaction.objects.filter(transaction_id="coord-1", side=Side.BPP).update(
+        BecknTransaction.objects.filter(transaction_id="coord-1", adapter=Adapter.BPP).update(
             counterparty_id="", counterparty_uri=""
         )
         self.fulfil()

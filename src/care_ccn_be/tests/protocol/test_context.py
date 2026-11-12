@@ -19,7 +19,7 @@ IDENTITY = NetworkIdentity(
 
 
 class ReferralContext(ContextBuilder):
-    discover_schema_context = "https://schema.beckn.io/ServiceCoordinationResource/v2.1/context.jsonld"
+    discover_schema_context = "https://schema.beckn.io/HealthResource/v2.1/context.jsonld"
 
     def default_bpp(self):
         return Endpoint("cc-bpp", "https://cc.example/bpp")

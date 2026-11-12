@@ -1,10 +1,10 @@
 from care.emr.models.referral import Referral
 
 from care_ccn_be import store
-from care_ccn_be.flows.referral import lifecycle
-from care_ccn_be.flows.referral.models import ReferralLink
-from care_ccn_be.flows.registry import FlowRegistry
-from care_ccn_be.models import BecknTransaction, Side
+from care_ccn_be.flows.referral import ReferralFlow
+from care_ccn_be.models import Adapter, BecknTransaction
+from care_ccn_be.models.referral import ReferralLink
+from care_ccn_be.services import referral as lifecycle
 from care_ccn_be.tests.referral.base import ReferralTestBase
 
 
@@ -12,7 +12,7 @@ class LifecycleTests(ReferralTestBase):
     def setUp(self):
         super().setUp()
         self.txn = store.open_bap_transaction(
-            FlowRegistry.get("referral"), self.user, transaction_id="coord-1", coordination_id="coord-1"
+            ReferralFlow, self.user, transaction_id="coord-1", coordination_id="coord-1"
         )
         self.patient = self.create_patient(name="Asha", gender="female")
 
@@ -32,7 +32,7 @@ class LifecycleTests(ReferralTestBase):
     def test_the_other_side_of_a_loopback_reuses_the_referral(self):
         origin = lifecycle.ensure_referral(self.txn, lifecycle.ORIGIN, self.data())
         bpp = BecknTransaction.objects.create(
-            transaction_id="coord-1", side=Side.BPP, flow="referral", coordination_id="coord-1"
+            transaction_id="coord-1", adapter=Adapter.BPP, flow="referral", coordination_id="coord-1"
         )
         reused = lifecycle.ensure_referral(bpp, lifecycle.ORIGIN, self.data())
         self.assertEqual(origin.pk, reused.pk)
@@ -46,7 +46,7 @@ class LifecycleTests(ReferralTestBase):
         self.assertEqual(lifecycle.current("coord-1").pk, assigned.pk)
 
     def test_missing_coordination_id_on_the_transaction_is_bound(self):
-        txn = BecknTransaction.objects.create(transaction_id="t-9", side=Side.BPP, flow="referral")
+        txn = BecknTransaction.objects.create(transaction_id="t-9", adapter=Adapter.BPP, flow="referral")
         referral = lifecycle.ensure_referral(txn, lifecycle.ORIGIN, self.data())
         txn.refresh_from_db()
         self.assertEqual(txn.coordination_id, "t-9")

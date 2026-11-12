@@ -1,8 +1,8 @@
 from care.emr.models import Patient
 from care.emr.models.scheduling.booking import TokenBooking
 
-from care_ccn_be.flows.appointment.models import AppointmentLink
 from care_ccn_be.models import Delivery, Direction, Processing
+from care_ccn_be.models.appointment import AppointmentLink
 from care_ccn_be.services import scheduling
 from care_ccn_be.tests.appointment.base import AppointmentTestBase
 
@@ -24,6 +24,14 @@ class BppTestBase(AppointmentTestBase):
 
     def assertError(self, payload, code):
         self.assertEqual(payload.get("error", {}).get("code"), code, payload)
+
+    def assertNack(self, action, txn_id, message, code, reason=""):
+        """An incomplete request is refused before the ACK: no callback is produced."""
+        body = self.request(action, txn_id, message).json()
+        self.assertEqual(body["message"]["ack"]["status"], "NACK", body)
+        self.assertEqual(body["error"]["code"], code, body)
+        self.assertIn(reason, body["error"]["message"])
+        return body
 
     def confirm(self, txn_id="t-1", slot=None, **attributes):
         slot = slot or self.first_slot()
@@ -75,7 +83,9 @@ class SelectTests(BppTestBase):
         self.assertError(self.call("select", "t-1", self.message("not-a-uuid")), "70004")
 
     def test_invalid_requested_date(self):
-        self.assertError(self.call("select", "t-1", self.message(preferredDate="soon")), "70002")
+        body = self.request("select", "t-1", self.message(preferredDate="soon")).json()
+        self.assertEqual(body["message"]["ack"]["status"], "NACK")
+        self.assertEqual(body["error"]["code"], "70002")
 
     def test_the_error_callback_marks_the_inbound_failed(self):
         self.call("select", "t-1", self.message("00000000-0000-0000-0000-000000000000"))
@@ -121,8 +131,7 @@ class InitTests(BppTestBase):
         self.assertEqual(patient.date_of_birth.isoformat(), "1985-04-12")
 
     def test_requires_a_patient(self):
-        payload = self.call("init", "t-1", self.contract(slot=self.first_slot(), patient=False))
-        self.assertError(payload, "70002")
+        self.assertNack("init", "t-1", self.contract(slot=self.first_slot(), patient=False), "70002", "PATIENT")
 
     def test_unknown_slot(self):
         message = self.contract(slot=self.first_slot())
@@ -130,7 +139,7 @@ class InitTests(BppTestBase):
         self.assertError(self.call("init", "t-1", message), "70004")
 
     def test_missing_slot(self):
-        self.assertError(self.call("init", "t-1", self.contract()), "70004")
+        self.assertNack("init", "t-1", self.contract(), "70002", "slot")
 
     def test_slot_of_another_resource(self):
         other = self.make_resource(self.create_user(username="dr.other"))
@@ -198,8 +207,7 @@ class ConfirmTests(BppTestBase):
         self.assertEqual(AppointmentLink.objects.count(), 0)
 
     def test_requires_a_patient(self):
-        payload = self.call("confirm", "t-1", self.contract(slot=self.first_slot(), patient=False))
-        self.assertError(payload, "70002")
+        self.assertNack("confirm", "t-1", self.contract(slot=self.first_slot(), patient=False), "70002", "PATIENT")
         self.assertEqual(TokenBooking.objects.count(), 0)
 
     def test_unknown_slot(self):

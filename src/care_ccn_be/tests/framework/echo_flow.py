@@ -1,26 +1,18 @@
 """A minimal test-only flow that exercises every framework path without touching Care models."""
 
-from care_ccn_be.bap.callbacks import BapCallbacksBase
-from care_ccn_be.bap.mixins import (
-    BapCancelMixin,
-    BapConfirmMixin,
-    BapDiscoverMixin,
-    BapInitMixin,
-    BapSelectMixin,
-    BapStatusMixin,
+from care_ccn_be.api.viewsets.base import (
+    BecknViewSet,
+    CancelMixin,
+    ConfirmMixin,
+    DiscoverMixin,
+    InitMixin,
+    SelectMixin,
+    StatusMixin,
 )
-from care_ccn_be.bap.viewset import BapViewSetBase
-from care_ccn_be.bpp.mixins import (
-    BppCancelMixin,
-    BppConfirmMixin,
-    BppDiscoverMixin,
-    BppInitMixin,
-    BppSelectMixin,
-)
-from care_ccn_be.bpp.service import BppServiceBase
+from care_ccn_be.api.viewsets.lookup import VIEWSETS
 from care_ccn_be.exceptions import BecknError
 from care_ccn_be.flows.base import BecknFlow
-from care_ccn_be.flows.registry import FlowRegistry
+from care_ccn_be.flows.lookup import FLOWS
 from care_ccn_be.protocol.builder import CatalogBuilder
 
 NETWORK = "echo-net"
@@ -32,36 +24,9 @@ class EchoCatalog(CatalogBuilder):
         return {"id": "echo-catalog", "resources": []}
 
 
-class EchoBppService(BppDiscoverMixin, BppSelectMixin, BppInitMixin, BppConfirmMixin, BppCancelMixin, BppServiceBase):
-    def bpp_init(self, call):
-        contract_id = (call.message.get("contract") or {}).get("id")
-        if contract_id == "boom":
-            raise BecknError("ECHO-1", "init refused")
-        if contract_id == "crash":
-            raise RuntimeError("unexpected")
-        return super().bpp_init(call)
-
-    def bpp_confirm(self, call):
-        message = super().bpp_confirm(call)
-        message["contract"]["id"] = "echo-contract-1"
-        return message
-
-
-class EchoCallbacks(BapCallbacksBase):
-    def on_confirm(self, call):
-        HOOKS.append((call.txn.transaction_id, call.msg.action))
-
-    def on_cancel(self, call):
-        raise RuntimeError("hook exploded")
-
-
-@FlowRegistry.register
 class EchoFlow(BecknFlow):
     name = "echo"
     aliases = ("echoing",)
-    bap_viewset = "care_ccn_be.tests.framework.echo_flow.EchoBapViewSet"
-    bap_callbacks = EchoCallbacks
-    bpp_service = EchoBppService
     catalog_builder = EchoCatalog
 
     @classmethod
@@ -73,28 +38,44 @@ class EchoFlow(BecknFlow):
         return "coord-1"
 
 
-class EchoBapViewSet(
-    BapDiscoverMixin,
-    BapSelectMixin,
-    BapInitMixin,
-    BapConfirmMixin,
-    BapStatusMixin,
-    BapCancelMixin,
-    BapViewSetBase,
-):
+class EchoViewSet(DiscoverMixin, SelectMixin, InitMixin, ConfirmMixin, StatusMixin, CancelMixin, BecknViewSet):
     flow = EchoFlow
+    on_status_spec = None
 
-    def bap_select(self, source):
+    def build_select(self, request_obj, txn, state):
         return {"contract": {"status": {"code": "DRAFT"}}}
 
-    def bap_init(self, source):
+    def build_init(self, request_obj, txn, state):
         return {"contract": {"id": "c-1", "status": {"code": "DRAFT"}}}
 
-    def bap_confirm(self, source):
+    def build_confirm(self, request_obj, txn, state):
         return {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}}
 
-    def bap_status(self, source):
-        return {"contract": {"id": source.txn.contract_id}}
+    def build_status(self, request_obj, txn, state):
+        return {"contract": {"id": txn.contract_id}}
 
-    def bap_cancel(self, source):
-        return {"contract": {"id": source.txn.contract_id}}
+    def build_cancel(self, request_obj, txn, state):
+        return {"contract": {"id": txn.contract_id}}
+
+    def on_confirm(self, call):
+        HOOKS.append((call.txn.transaction_id, call.msg.action))
+
+    def on_cancel(self, call):
+        raise RuntimeError("hook exploded")
+
+    def perform_on_init(self, request_obj, call):
+        contract_id = (call.message.get("contract") or {}).get("id")
+        if contract_id == "boom":
+            raise BecknError("ECHO-1", "init refused")
+        if contract_id == "crash":
+            raise RuntimeError("unexpected")
+        return super().perform_on_init(request_obj, call)
+
+    def perform_on_confirm(self, request_obj, call):
+        message = super().perform_on_confirm(request_obj, call)
+        message["contract"]["id"] = "echo-contract-1"
+        return message
+
+
+FLOWS[EchoFlow.name] = EchoFlow
+VIEWSETS[EchoFlow.name] = EchoViewSet

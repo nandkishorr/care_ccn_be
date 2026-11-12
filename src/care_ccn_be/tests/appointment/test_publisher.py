@@ -5,8 +5,8 @@ from django.core.management.base import CommandError
 from django.test import override_settings
 
 from care_ccn_be.exceptions import BecknError
-from care_ccn_be.flows.appointment.flow import AppointmentFlow
-from care_ccn_be.flows.registry import FlowRegistry
+from care_ccn_be.flows.appointment import AppointmentFlow
+from care_ccn_be.flows.lookup import get_flow
 from care_ccn_be.models import BecknMessage, Delivery, Direction
 from care_ccn_be.services.publisher import PublishSpec, build_publish_payload, publish_catalog
 from care_ccn_be.tests.appointment.base import APPOINTMENT_PLUGIN, AppointmentTestBase
@@ -136,7 +136,7 @@ class PublishCommandTests(AppointmentTestBase):
             self.run_command("--flow", "nope")
 
     def test_a_disabled_flow(self):
-        self.assertIsNotNone(FlowRegistry.get("referral"))
+        self.assertIsNotNone(get_flow("referral"))
         with self.assertRaisesMessage(CommandError, "not enabled"):
             self.run_command("--flow", "referral")
         with self.assertRaisesMessage(CommandError, "not enabled"):

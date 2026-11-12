@@ -18,7 +18,7 @@ class HousekeepingTests(FrameworkTestBase):
             mock.patch("care_ccn_be.store.enqueue_delivery"),
             mock.patch("care_ccn_be.tasks.process_bpp_request.apply_async"),
         ):
-            txn_id = self.bap().json()["transactionId"]
+            txn_id = self.bap().json()["transaction_id"]
             self.anon.post("/bpp/receiver/select", inbound_request("select"), format="json")
         out = BecknMessage.objects.get(direction=Direction.OUT, delivery_status=Delivery.QUEUED)
         inbound = BecknMessage.objects.get(direction=Direction.IN, processing_status=Processing.PENDING)

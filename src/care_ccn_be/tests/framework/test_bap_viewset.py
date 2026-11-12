@@ -12,7 +12,7 @@ class BapViewSetTests(FrameworkTestBase):
         body = response.json()
         self.assertEqual(body["status"], "QUEUED")
         self.assertEqual(body["action"], "discover")
-        txn = self.bap_txn(body["transactionId"])
+        txn = self.bap_txn(body["transaction_id"])
         (msg,) = self.messages(txn)
         self.assertEqual(msg.delivery_status, Delivery.ACKED)
         self.assertEqual(msg.direction, Direction.OUT)
@@ -28,12 +28,20 @@ class BapViewSetTests(FrameworkTestBase):
 
         with mock.patch("care_ccn_be.store.enqueue_delivery"):
             body = self.bap().json()
-        self.assertEqual(self.bap_txn(body["transactionId"]).status, "QUEUED")
+        self.assertEqual(self.bap_txn(body["transaction_id"]).status, "QUEUED")
 
     def test_context_overrides_are_remembered_for_later_actions(self):
         self.stub_delivery()
-        txn_id = self.bap().json()["transactionId"]
-        self.bap(txn_id, "select", {"context": {"bppId": "bpp.x", "bppUri": "http://bpp.x", "messageId": "evil"}})
+        txn_id = self.bap().json()["transaction_id"]
+        context = {
+            "network_id": "echo-net",
+            "bap_id": "bap.care",
+            "bap_uri": "http://bap.care",
+            "bpp_id": "bpp.x",
+            "bpp_uri": "http://bpp.x",
+            "message_id": "evil",
+        }
+        self.assertEqual(self.bap(txn_id, "select", {"context": context}).status_code, 202)
         self.bap(txn_id, "init")
         selects = [p for _, a, p in self.sent if a == "select"]
         inits = [p for _, a, p in self.sent if a == "init"]
@@ -43,7 +51,7 @@ class BapViewSetTests(FrameworkTestBase):
 
     def test_passthrough_message_replaces_the_builder(self):
         self.stub_delivery()
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         self.bap(txn_id, "select", {"message": {"contract": {"id": "custom"}}})
         payload = next(p for _, a, p in self.sent if a == "select")
         self.assertEqual(payload["message"], {"contract": {"id": "custom"}})
@@ -67,7 +75,7 @@ class BapViewSetTests(FrameworkTestBase):
         from care_ccn_be.tests.framework.base import PLUGIN
 
         with override_settings(PLUGIN_CONFIGS={"care_ccn_be": {**PLUGIN, "BECKN_BAP_CALLER_URL": ""}}):
-            txn_id = self.bap().json()["transactionId"]
+            txn_id = self.bap().json()["transaction_id"]
         txn = self.bap_txn(txn_id)
         self.assertEqual(txn.status, "ERROR")
         self.assertEqual(txn.last_error["code"], "NOT_CONFIGURED")
@@ -77,16 +85,16 @@ class BapViewSetTests(FrameworkTestBase):
         self.stub_delivery(
             AckResult("nack", {"statusCode": 200, "body": {}, "error": {"code": "70002", "message": "bad"}})
         )
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         poll = self.client.get(f"/bap/echo/{txn_id}/").json()
         self.assertEqual(poll["status"], "NACK")
-        self.assertEqual(poll["error"]["code"], "70002")
+        self.assertEqual(poll["last_error"]["code"], "70002")
 
     def test_retryable_delivery_raises_and_final_failure_marks_the_transaction(self):
         from unittest import mock
 
         with mock.patch("care_ccn_be.store.enqueue_delivery"):
-            txn_id = self.bap().json()["transactionId"]
+            txn_id = self.bap().json()["transaction_id"]
         txn = self.bap_txn(txn_id)
         (msg,) = self.messages(txn)
         self.stub_delivery(AckResult(ERROR, {"reason": "timeout"}))
@@ -104,34 +112,37 @@ class BapViewSetTests(FrameworkTestBase):
 
     def test_delivery_is_idempotent(self):
         self.stub_delivery()
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         (msg,) = self.messages(self.bap_txn(txn_id))
         self.assertEqual(deliver_beckn_message.run(msg.pk), "noop")
         self.assertEqual(len(self.sent), 1)
 
     def test_poll_shape(self):
         self.stub_delivery()
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         poll = self.client.get(f"/bap/echo/{txn_id}/").json()
         for key in (
-            "transactionId",
+            "transaction_id",
             "flow",
-            "serviceType",
             "status",
             "routing",
             "context",
             "actions",
-            "contractId",
-            "error",
+            "contract_id",
+            "last_error",
         ):
             self.assertIn(key, poll)
         self.assertEqual(poll["actions"], ["DISCOVER"])
-        self.assertEqual(poll["routing"]["bapId"], "bap.care")
+        self.assertEqual(poll["routing"]["bap_id"], "bap.care")
 
     def test_action_view_for_a_request_returns_what_was_sent(self):
         self.stub_delivery()
-        txn_id = self.bap().json()["transactionId"]
-        view = self.client.get(f"/bap/echo/{txn_id}/?action=discover").json()
-        self.assertTrue(view["ready"])
-        self.assertEqual(view["data"]["context"]["action"], "discover")
-        self.assertFalse(self.client.get(f"/bap/echo/{txn_id}/?action=on_select").json()["ready"])
+        txn_id = self.bap().json()["transaction_id"]
+
+        def messages(action):
+            query = {"transaction_id": txn_id, "action": action}
+            return self.client.get("/bap/message/", query).json()["results"]
+
+        (discover,) = messages("discover")
+        self.assertEqual(discover["payload"]["context"]["action"], "discover")
+        self.assertEqual(messages("on_select"), [])

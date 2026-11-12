@@ -4,7 +4,7 @@
     "action": "confirm",
     "version": "2.0.0",
     "bapId": "cnn_beck_bap.ohc.network",
-    "bapUri": "https://roving-whiny-underpay.ngrok-free.dev/bap/receiver",
+    "bapUri": "https://ccn-onyx.nandkishorr.dev/bap/receiver",
     "transactionId": "a9046a23-4550-4cc1-b6ab-6aa5c86ce29f",
     "messageId": "1f575c9c-abbc-5e2c-b499-bf84dd85ce13",
     "timestamp": "2026-06-30T09:40:00+05:30",

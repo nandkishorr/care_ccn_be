@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from care_ccn_be.protocol.ack import ack, is_nack, nack, nack_from
 from care_ccn_be.protocol.builder import ContractBuilder, Part
-from care_ccn_be.protocol.schema import (
+from care_ccn_be.resources.beckn import (
     BecknModel,
     BecknRequest,
     Commitment,
@@ -26,7 +26,7 @@ from care_ccn_be.protocol.schema import (
     Resource,
     Status,
 )
-from care_ccn_be.protocol.schema.health import HealthContract, HealthId, HealthParticipant, HealthPerformance
+from care_ccn_be.resources.beckn.health import HealthContract, HealthId, HealthParticipant, HealthPerformance
 
 PAYLOADS = pathlib.Path(__file__).parent / "payloads"
 INIT = json.loads((PAYLOADS / "init.json").read_text())
@@ -146,7 +146,7 @@ class AckTests(SimpleTestCase):
         self.assertEqual(ack(), {"message": {"ack": {"status": "ACK"}}})
         self.assertFalse(is_nack(ack()))
 
-    def test_nack_shape_matches_legacy_wire(self):
+    def test_nack_wire_shape(self):
         body = nack("70001", "unsupported", "CONTEXT-ERROR")
         self.assertEqual(body["message"]["ack"]["status"], "NACK")
         self.assertEqual(body["error"], {"type": "CONTEXT-ERROR", "code": "70001", "message": "unsupported"})

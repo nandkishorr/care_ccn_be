@@ -149,7 +149,7 @@ class BapReceiverTests(FrameworkTestBase):
     def setUp(self):
         super().setUp()
         self.stub_delivery()
-        self.txn_id = self.bap().json()["transactionId"]
+        self.txn_id = self.bap().json()["transaction_id"]
 
     def callback(self, action, **kwargs):
         payload = inbound_callback(action, self.txn_id, **kwargs)
@@ -158,8 +158,8 @@ class BapReceiverTests(FrameworkTestBase):
     def test_on_discover_from_several_responders_is_merged(self):
         for bpp, cat in (("bpp.a", "A"), ("bpp.b", "B")):
             self.callback("on_discover", bppId=bpp, bppUri=f"http://{bpp}", message={"catalogs": [{"id": cat}]})
-        view = self.client.get(f"/bap/echo/{self.txn_id}/?action=on_discover").json()
-        self.assertEqual([c["id"] for c in view["data"]["message"]["catalogs"]], ["A", "B"])
+        catalogs = self.client.get(f"/bap/echo/{self.txn_id}/catalogs/").json()["catalogs"]
+        self.assertEqual([c["id"] for c in catalogs], ["A", "B"])
         txn = self.bap_txn(self.txn_id)
         self.assertEqual(txn.counterparty_id, "")  # a discover callback never picks the counterparty
         self.assertEqual(txn.status, "ON_DISCOVER")
@@ -171,7 +171,7 @@ class BapReceiverTests(FrameworkTestBase):
         self.assertEqual((txn.status, txn.counterparty_id, txn.contract_id), ("ON_SELECT", "bpp.remote", "c-9"))
         poll = self.client.get(f"/bap/echo/{self.txn_id}/").json()
         self.assertEqual(poll["actions"], ["DISCOVER", "SELECT", "ON_SELECT"])
-        self.assertEqual(poll["contractId"], "c-9")
+        self.assertEqual(poll["contract_id"], "c-9")
 
     def test_later_requests_are_routed_to_the_learned_counterparty(self):
         self.bap(self.txn_id, "select")
@@ -226,9 +226,9 @@ class BapReceiverTests(FrameworkTestBase):
 class LoopbackTests(FrameworkTestBase):
     def test_full_discover_select_init_confirm_loop(self):
         self.loopback()
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         self.assertEqual(self.bap_txn(txn_id).status, "ON_DISCOVER")
-        catalogs = self.client.get(f"/bap/echo/{txn_id}/?action=on_discover").json()["data"]["message"]["catalogs"]
+        catalogs = self.client.get(f"/bap/echo/{txn_id}/catalogs/").json()["catalogs"]
         self.assertEqual(catalogs[0]["id"], "echo-catalog")
         self.bap(txn_id, "select")
         self.bap(txn_id, "init")
@@ -238,20 +238,20 @@ class LoopbackTests(FrameworkTestBase):
         self.assertEqual(bap.contract_id, "echo-contract-1")
         poll = self.client.get(f"/bap/echo/{txn_id}/").json()
         self.assertEqual(poll["actions"][-2:], ["CONFIRM", "ON_CONFIRM"])
-        self.assertEqual(poll["contractId"], "echo-contract-1")
+        self.assertEqual(poll["contract_id"], "echo-contract-1")
         self.assertEqual(echo_flow.HOOKS, [(txn_id, "on_confirm")])
         self.assertFalse(BecknMessage.objects.exclude(delivery_status__in=["", Delivery.ACKED]).exists())
         self.assertFalse(BecknMessage.objects.filter(processing_status=Processing.PENDING).exists())
 
     def test_downstream_nack_marks_the_bap_transaction(self):
         self.loopback(nack_actions=("select",))
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         self.bap(txn_id, "select")
         self.assertEqual(self.bap_txn(txn_id).status, "NACK")
 
     def test_bpp_domain_error_comes_back_as_an_error_status(self):
         self.loopback()
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         self.bap(txn_id, "select")
         self.bap(txn_id, "init", {"message": {"contract": {"id": "boom"}}})
         txn = self.bap_txn(txn_id)

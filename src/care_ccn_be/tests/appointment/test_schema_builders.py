@@ -7,7 +7,16 @@ from types import SimpleNamespace
 from django.test import SimpleTestCase
 from pydantic import ValidationError
 
-from care_ccn_be.flows.appointment.builders import (
+from care_ccn_be.protocol.builder import Part
+from care_ccn_be.resources.appointment.schema import (
+    AppointmentConfirmRequest,
+    AppointmentContract,
+    AppointmentInitRequest,
+    AppointmentRequest,
+)
+from care_ccn_be.resources.beckn import Consideration, HasConsideration, JsonLdModel, Price
+from care_ccn_be.resources.beckn.health import HealthContract, HealthParticipant, HealthPerformance
+from care_ccn_be.resources.builders.appointment import (
     AppointmentCancelBuilder,
     AppointmentConfirmBuilder,
     AppointmentInitBuilder,
@@ -21,15 +30,6 @@ from care_ccn_be.flows.appointment.builders import (
     echo_with_slots,
     service_type_of,
 )
-from care_ccn_be.flows.appointment.schema import (
-    AppointmentConfirmRequest,
-    AppointmentContract,
-    AppointmentInitRequest,
-    AppointmentRequest,
-)
-from care_ccn_be.protocol.builder import Part
-from care_ccn_be.protocol.schema import Consideration, HasConsideration, JsonLdModel, Price
-from care_ccn_be.protocol.schema.health import HealthContract, HealthParticipant, HealthPerformance
 
 PAYLOADS = pathlib.Path(__file__).parent / "payloads"
 INIT = json.loads((PAYLOADS / "init.json").read_text())

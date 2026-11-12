@@ -3,10 +3,10 @@ from django.test import override_settings
 
 from care_ccn_be.context_vars import suppress_beckn_signals
 from care_ccn_be.events import booking_fulfilled
-from care_ccn_be.flows.appointment.models import AppointmentLink
-from care_ccn_be.flows.appointment.tasks import send_appointment_update
 from care_ccn_be.models import Delivery, Direction
+from care_ccn_be.models.appointment import AppointmentLink
 from care_ccn_be.services import scheduling
+from care_ccn_be.tasks.appointment import send_appointment_update
 from care_ccn_be.tests.appointment.base import APPOINTMENT_PLUGIN, AppointmentTestBase
 
 

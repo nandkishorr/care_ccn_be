@@ -3,7 +3,7 @@ from django.test import override_settings
 from model_bakery import baker
 
 from care_ccn_be.context_vars import suppress_beckn_signals
-from care_ccn_be.models import Side
+from care_ccn_be.models import Adapter
 from care_ccn_be.services import availability as availabilities
 from care_ccn_be.tests.framework.base import PLUGIN, FrameworkTestBase, inbound_callback, inbound_request
 
@@ -23,13 +23,17 @@ class ReferralTestBase(FrameworkTestBase):
         url = "/bap/referral/discover/" if action == "discover" else f"/bap/referral/{txn_id}/{action}/"
         return (client or self.client).post(url, body or {}, format="json")
 
-    def poll(self, txn_id, action=None):
-        suffix = f"?action={action}" if action else ""
-        return self.client.get(f"/bap/referral/{txn_id}/{suffix}").json()
+    def poll(self, txn_id):
+        return self.client.get(f"/bap/referral/{txn_id}/").json()
+
+    def message(self, txn_id, action):
+        """The latest stored payload of ``action`` on the BAP transaction (``bap/message/``)."""
+        results = self.client.get("/bap/message/", {"transaction_id": txn_id, "action": action}).json()["results"]
+        return results[-1]["payload"]
 
     def new_transaction(self):
         self.stub_delivery()
-        txn_id = self.bap().json()["transactionId"]
+        txn_id = self.bap().json()["transaction_id"]
         self.on_discover(txn_id)
         return txn_id
 
@@ -105,4 +109,4 @@ class ReferralTestBase(FrameworkTestBase):
     def bpp_txn_of(self, coordination_id):
         from care_ccn_be.models import BecknTransaction
 
-        return BecknTransaction.objects.get(transaction_id=coordination_id, side=Side.BPP)
+        return BecknTransaction.objects.get(transaction_id=coordination_id, adapter=Adapter.BPP)

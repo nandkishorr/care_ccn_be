@@ -5,7 +5,7 @@ from care.utils.tests.base import CareAPITestBase
 from django.test import override_settings
 from rest_framework.test import APIClient
 
-from care_ccn_be.models import BecknMessage, BecknTransaction, Side
+from care_ccn_be.models import Adapter, BecknMessage, BecknTransaction
 from care_ccn_be.protocol.ack import is_nack
 from care_ccn_be.protocol.client import ACK, NACK, AckResult
 from care_ccn_be.tests.framework import echo_flow
@@ -78,10 +78,10 @@ class FrameworkTestBase(CareAPITestBase):
         return (client or self.client).post(url, body or {}, format="json")
 
     def bap_txn(self, txn_id):
-        return BecknTransaction.objects.get(transaction_id=txn_id, side=Side.BAP)
+        return BecknTransaction.objects.get(transaction_id=txn_id, adapter=Adapter.BAP)
 
     def bpp_txn(self, txn_id):
-        return BecknTransaction.objects.get(transaction_id=txn_id, side=Side.BPP)
+        return BecknTransaction.objects.get(transaction_id=txn_id, adapter=Adapter.BPP)
 
     @staticmethod
     def messages(txn, **filters):

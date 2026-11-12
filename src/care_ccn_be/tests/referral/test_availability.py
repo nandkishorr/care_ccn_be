@@ -6,7 +6,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from care_ccn_be.flows.referral.builders import referral_type_for_category
+from care_ccn_be.resources.builders.referral import referral_type_for_category
 from care_ccn_be.services import availability as availabilities
 from care_ccn_be.tests.referral.base import ReferralTestBase
 

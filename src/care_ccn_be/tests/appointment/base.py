@@ -7,11 +7,18 @@ from django.test import override_settings
 from django.test.utils import ignore_warnings
 from django.utils import timezone
 
-from care_ccn_be.flows.appointment.models import AppointmentLink
+from care_ccn_be.models.appointment import AppointmentLink
 from care_ccn_be.tests.framework.base import PLUGIN, FrameworkTestBase
 
 APPOINTMENT_PLUGIN = {**PLUGIN, "BECKN_ENABLED_FLOWS": ["appointment"], "BECKN_NETWORK_ID": "nfh-test"}
-BPP = {"bppId": "bpp.care", "bppUri": "http://bpp.care"}
+# the BAP context overrides of a select that targets this Care instance's BPP (loopback)
+BPP = {
+    "network_id": "nfh-test",
+    "bap_id": "bap.care",
+    "bap_uri": "http://bap.care",
+    "bpp_id": "bpp.care",
+    "bpp_uri": "http://bpp.care",
+}
 
 
 @ignore_warnings(category=RuntimeWarning, message=r".*received a naive datetime.*")
@@ -69,9 +76,13 @@ class AppointmentTestBase(FrameworkTestBase):
         url = "/bap/appointment/discover/" if action == "discover" else f"/bap/appointment/{txn_id}/{action}/"
         return (client or self.client).post(url, body or {}, format="json")
 
-    def poll(self, txn_id, action=None):
-        suffix = f"?action={action}" if action else ""
-        return self.client.get(f"/bap/appointment/{txn_id}/{suffix}").json()
+    def poll(self, txn_id):
+        return self.client.get(f"/bap/appointment/{txn_id}/").json()
+
+    def message(self, txn_id, action):
+        """The latest stored payload of ``action`` on the BAP transaction (``bap/message/``)."""
+        results = self.client.get("/bap/message/", {"transaction_id": txn_id, "action": action}).json()["results"]
+        return results[-1]["payload"]
 
     def request(self, action, txn_id, message, message_id="m-1", **ctx):
         from care_ccn_be.tests.framework.base import inbound_request

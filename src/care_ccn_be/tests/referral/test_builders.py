@@ -1,26 +1,26 @@
 from care.emr.models import Encounter
 from model_bakery import baker
 
-from care_ccn_be.flows.referral import builders
-from care_ccn_be.flows.referral.builders import CareReferral, ReferralCareConfirmBuilder, ReferralEcho
+from care_ccn_be.resources.builders import referral as builders
+from care_ccn_be.resources.builders.referral import CareReferral, ReferralCareConfirmBuilder, ReferralEcho
 from care_ccn_be.services import availability as availabilities
 from care_ccn_be.tests.referral.base import ReferralTestBase
 
 
 class ServiceCategoryCriteriaTests(ReferralTestBase):
     def test_patient_care_is_a_consultation(self):
-        criteria = builders.service_category_criteria("patient_care")
+        criteria = builders.service_category_criteria("patient_care").dump()
         self.assertEqual(criteria["serviceCategory"]["code"], "CONSULTATION")
         self.assertEqual(criteria["procedureNeeds"], ["HOME_VISIT"])
         self.assertEqual(criteria["consultationModality"], "IN_PERSON")
 
     def test_other_categories_are_an_investigation(self):
-        criteria = builders.service_category_criteria("other")
+        criteria = builders.service_category_criteria("other").dump()
         self.assertEqual(criteria["serviceCategory"]["code"], "INVESTIGATION")
         self.assertNotIn("healthServiceType", criteria)
 
     def test_medicines_add_pharmacy_dispensing(self):
-        criteria = builders.service_category_criteria("medicines")
+        criteria = builders.service_category_criteria("medicines").dump()
         self.assertEqual(criteria["serviceCategory"]["code"], "INVESTIGATION")
         self.assertEqual(criteria["healthServiceType"], "PHARMACY_DISPENSING")
 

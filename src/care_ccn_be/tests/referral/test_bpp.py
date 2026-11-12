@@ -2,9 +2,9 @@ from care.emr.models import Patient
 from care.emr.models.patient import PatientIdentifier
 from care.emr.models.referral import Referral
 
-from care_ccn_be.flows.referral import lifecycle
-from care_ccn_be.flows.referral.models import ReferralLink
+from care_ccn_be.models.referral import ReferralLink
 from care_ccn_be.services import availability as availabilities
+from care_ccn_be.services import referral as lifecycle
 from care_ccn_be.tests.referral.base import ReferralTestBase
 
 

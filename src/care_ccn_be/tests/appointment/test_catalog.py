@@ -1,4 +1,4 @@
-from care_ccn_be.flows.appointment.catalog import AppointmentCatalogBuilder
+from care_ccn_be.resources.catalog.appointment import AppointmentCatalogBuilder
 from care_ccn_be.tests.appointment.base import AppointmentTestBase
 
 
