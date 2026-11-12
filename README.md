@@ -2,13 +2,12 @@
 
 Beckn (NFH / DHP) BAP and BPP plugin for [ohcnetwork/care](https://github.com/ohcnetwork/care).
 
-It replaces Care core's `care/beckn` app: a pure protocol layer, a flow framework (BAP viewsets, BPP receiver and
-services, Celery delivery) and two flows, `referral` and `appointment`. Transactions and messages live in plugin tables
-instead of Redis.
+It replaces Care core's `care/beckn` app: a pure protocol layer, a flow framework (BAP and BPP APIs built on CARE's
+EMR viewsets, one mixin per Beckn action, Celery delivery) and two flows, `referral` and `appointment`. Transactions
+and messages live in plugin tables instead of Redis.
 
 - [Architecture](docs/architecture.md)
 - [Frontend API](docs/fe_api.md)
-- [Cutover, backfill and rollback](docs/cutover.md)
 
 ## Local development
 
@@ -53,10 +52,21 @@ care_ccn_be_plug = Plug(
 Every setting keeps its `BECKN_*` name. Lookup order: `PLUGIN_CONFIGS["care_ccn_be"]`, then the environment variable,
 then the default. See `DEFAULTS` in `src/care_ccn_be/settings.py` for the full list.
 
-## One implementation at a time
+BAP/BPP defaults live in `src/care_ccn_be/adapters/__init__.py` and are merged into that list.
+`adapters/bap.py` handles BAP identity and caller configuration; `adapters/bpp.py` handles BPP identity,
+caller and catalog publishing configuration. The referral coordination-centre settings (`BECKN_CC_BPP_*`)
+live in `flows/referral/__init__.py` alongside referral defaults. `flows/referral/config.py` resolves the remote
+coordination-centre endpoint, not Care's own BPP. Existing setting keys and lookup precedence remain unchanged.
 
-While Care core's `care.beckn` app is installed, the plugin stays passive and `manage.py check` reports warning
-`care_ccn_be.W001`. Disabling the core app activates the plugin.
+Each flow has one viewset in `flows/<flow>/api.py` containing both BAP and BPP hooks. Existing
+`bap/<flow>/` and `bpp/<flow>/` routes bind the adapter per instance; BAP actions are not exposed on BPP routes.
+Contract builders live in
+`resources/builders/<flow>.py`; catalog builders live in `resources/catalog/<flow>.py` when the flow supports catalogs.
+
+Shared constants and context builders live in `constants.py` and `context.py`. Flow link models, signal receivers,
+and Celery tasks live in `models/<flow>.py`, `signals/<flow>.py`, and `tasks/<flow>.py` respectively.
+Shared delivery and housekeeping tasks remain available from `care_ccn_be.tasks`. Flow tasks are registered even
+when disabled; signal receivers are loaded only for enabled flows. Existing task names and database tables are unchanged.
 
 ## Tests
 
