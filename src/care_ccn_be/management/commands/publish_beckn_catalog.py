@@ -10,12 +10,12 @@ import json
 from django.core.management.base import BaseCommand, CommandError
 
 from care_ccn_be.exceptions import BecknError
-from care_ccn_be.flows.registry import FlowRegistry
+from care_ccn_be.flows.lookup import enabled_flows, get_flow, is_flow_enabled
 from care_ccn_be.services.publisher import publish_catalog
 
 
 class Command(BaseCommand):
-    help = "Publish the Beckn catalog of the enabled flows (catalog/publish via the BPP caller)."
+    help = "Publish the Beckn catalog of the enabled flows (catalog/publish to the ONIX catalogPublish module)."
 
     def add_arguments(self, parser):
         parser.add_argument("--flow", help="Publish only this flow's catalog (default: every enabled flow with one).")
@@ -56,11 +56,11 @@ class Command(BaseCommand):
     @staticmethod
     def flows(name: str | None):
         if not name:
-            return [flow for flow in FlowRegistry.enabled() if flow.catalog_builder is not None]
+            return [flow for flow in enabled_flows() if flow.catalog_builder is not None]
         try:
-            flow = FlowRegistry.get(name)
+            flow = get_flow(name)
         except (KeyError, LookupError) as exc:
             raise CommandError(f"unknown flow {name!r}") from exc
-        if not FlowRegistry.is_enabled(flow.name):
+        if not is_flow_enabled(flow.name):
             raise CommandError(f"flow {flow.name!r} is not enabled")
         return [flow]

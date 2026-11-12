@@ -9,7 +9,7 @@ one of them is sent to that target.
 
 from django.core.management.base import BaseCommand, CommandError
 
-from care_ccn_be.identity import cc_endpoint
+from care_ccn_be.flows.defaults import cc_endpoint
 from care_ccn_be.services import availability as availabilities
 
 
