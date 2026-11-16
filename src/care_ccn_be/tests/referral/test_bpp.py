@@ -145,9 +145,13 @@ class BppTests(ReferralTestBase):
         self.assertEqual(Referral.objects.count(), 2)
 
     def test_unsupported_actions_are_nacked(self):
-        for action in ("cancel", "update"):
-            response = self.request(action, "coord-1", self.referral_message())
-            self.assertEqual(self.ack(response), "NACK")
+        response = self.request("cancel", "coord-1", self.referral_message())
+        self.assertEqual(self.ack(response), "NACK")
+
+    def test_an_update_for_an_unknown_referral_answers_an_error(self):
+        self.assertEqual(self.ack(self.request("update", "coord-1", self.referral_message())), "ACK")
+        (callback,) = self.callbacks("on_update")
+        self.assertIn("Referral not found", callback["error"]["message"])
 
     def test_inbound_referral_is_routed_to_the_flow_and_the_coordination_id_is_stored(self):
         self.request("select", "coord-7", self.referral_message(coordination_id="coord-7"))

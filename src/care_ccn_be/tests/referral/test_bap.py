@@ -111,10 +111,9 @@ class FlowAdapterTests(ReferralTestBase):
         txn_id = self.new_transaction()
         self.assertEqual(self.bap(txn_id, "init", {"facility": "f", "bogus": 1}).status_code, 400)
 
-    def test_cancel_and_update_are_not_exposed(self):
-        for action in ("cancel", "update"):
-            with self.assertRaises(Resolver404):
-                resolve(f"/bap/referral/txn-1/{action}/", urlconf=ROOT_URLCONF)
+    def test_cancel_is_not_exposed(self):
+        with self.assertRaises(Resolver404):
+            resolve("/bap/referral/txn-1/cancel/", urlconf=ROOT_URLCONF)
 
     def test_status_sends_the_contract_id(self):
         txn_id = self.new_transaction()
@@ -175,7 +174,44 @@ class BAPReceiverTests(ReferralTestBase):
         )
         self.assertEqual(referral.created_by, self.system)
         link = ReferralLink.objects.get()
-        self.assertEqual(link.details, {"urgency": "EMERGENCY", "originFacilityId": str(self.origin.external_id)})
+        self.assertEqual(
+            link.details, {"urgency": "EMERGENCY", "originFacilityId": str(self.origin.external_id), "confirmed": True}
+        )
+
+    def test_referral_id_resolves_the_original_transaction_and_status_action(self):
+        txn_id = self.new_transaction()
+        body = {"facility": str(self.origin.external_id), "patient_name": "Asha"}
+        self.bap(txn_id, "confirm", body)
+        self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
+        referral_id = str(Referral.objects.get().external_id)
+        self.assertNotEqual(referral_id, txn_id)
+        self.assertEqual(self.poll(referral_id)["transaction_id"], txn_id)
+        self.assertEqual(self.bap(referral_id, "status").status_code, 202)
+        payload = next(payload for _, action, payload in reversed(self.sent) if action == "status")
+        self.assertEqual(payload["context"]["transactionId"], txn_id)
+
+    def test_on_confirm_stores_remote_referral_id_for_a_new_origin(self):
+        txn_id = self.new_transaction()
+        self.bap(txn_id, "confirm", {"facility": str(self.origin.external_id), "patient_name": "Asha"})
+        message = {
+            "contract": {
+                "id": "contract-1",
+                "status": {"code": "ACTIVE"},
+                "contractAttributes": {"referral": {"id": "remote-referral-1"}},
+            }
+        }
+        self.callback("on_confirm", txn_id, message)
+        link = ReferralLink.objects.get()
+        self.assertEqual(link.details["external_referral_id"], "remote-referral-1")
+        self.assertEqual(self.poll(txn_id)["contract_id"], "contract-1")
+        self.callback(
+            "on_confirm",
+            txn_id,
+            {"contract": {"id": "contract-1", "status": {"code": "ACTIVE"}}},
+            message_id="cb-2",
+        )
+        link.refresh_from_db()
+        self.assertEqual(link.details["external_referral_id"], "remote-referral-1")
 
     def test_a_non_consultation_category_is_a_lab_referral(self):
         txn_id = self.new_transaction()

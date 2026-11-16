@@ -50,6 +50,21 @@ Every action body:
 A referral `encounter` stays in Care (it is not sent to the network): the origin `Referral` is linked to it, and its
 patient is used when `patient` is omitted. It must belong to `patient` and `facility`, else `400`; unknown is `404`.
 
+### Automatic referral file synchronization
+
+Completed Care uploads with `file_type="referral"` and `associating_id` set to a network-linked referral's UUID
+are automatically attached as `source` resources and synchronized after commit. Existing attachments keep their
+category. No separate Beckn update call is required: the origin sends `update`, and the assigned instance sends
+`on_update`. Files explicitly shared as referral resources also synchronize when their upload completes.
+
+The other instance downloads the signed file URL into its own storage and attaches a local copy to the matching
+referral. Imported files are marked to prevent echoing them back; incomplete, deleted and archived files are not sent.
+Origin updates wait for confirmation. Both instances must run Celery workers, and each must configure
+`BECKN_ARTIFACT_ALLOWED_HOSTS` to allow the other instance's storage host. Signed URL lifetime and download size
+are controlled by `BECKN_ARTIFACT_URL_TTL` and `BECKN_ARTIFACT_MAX_BYTES`.
+This synchronization covers file uploads and completed referral questionnaire responses. Other shared clinical
+records, such as diagnostic reports, are not currently synchronized.
+
 ## Responses
 
 ```json
@@ -77,6 +92,14 @@ Retrieve the transaction to follow it:
   arrives. `NACK` and `ERROR` carry `last_error`; a missing caller URL is `ERROR` with `last_error.code =
   "NOT_CONFIGURED"`.
 - Referral transactions also carry `referral_id`, the origin Care `Referral`.
+- For BAP referral detail and action routes, the origin referral UUID can also be used in place of
+  `{transaction_id}`. Responses and network messages still contain the original transaction ID. This allows the
+  referral's network status panel to find transactions created through discovery as well as Care-created referrals.
+- On a successful `on_confirm`, `contract.contractAttributes.referral.id` is saved on the referral link as the
+  remote referral ID, separately from `contract.id`. Subsequent automatic `update` messages include that remote
+  ID in `contract.contractAttributes.referral.id`, the contract ID in `contract.id`, and the BPP routing from the
+  callback. Existing links recover this ID from a retained successful callback when they next synchronize.
+  If the callback does not include a remote referral ID, updates omit it for compatibility.
 - The payload of a request or callback: `GET bap/message/?transaction_id=…&action=on_select` (`payload` holds the
   full Beckn body). Merged discover catalogs: `GET bap/<flow>/{transaction_id}/catalogs/`.
 

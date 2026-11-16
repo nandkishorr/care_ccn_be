@@ -164,11 +164,34 @@ def adopt(txn, role: str, referral: Referral, details: dict[str, Any] | None = N
     return link
 
 
+def remember_confirmation(link: ReferralLink, message: dict[str, Any]) -> None:
+    remote_referral = mappers.get_contract_attributes(message).get("referral") or {}
+    remote_id = remote_referral.get("id") if isinstance(remote_referral, dict) else None
+    link.details = {**(link.details or {}), "confirmed": True}
+    if remote_id:
+        link.details["external_referral_id"] = str(remote_id)
+    link.save(update_fields=["details"])
+
+
 def complete(coordination_id: str, role: str) -> Referral | None:
     referral = current(coordination_id, role)
     if referral is None or referral.status == COMPLETED:
         return None
     return _set_status(referral, COMPLETED)
+
+
+STATUS_RANK = {PENDING: 0, IN_PROGRESS: 1}
+CLOSED_RANK = 2
+KNOWN_STATUSES = {status.value for status in ReferralStatus}
+
+
+def advance(referral: Referral, status: str | None) -> Referral:
+    """Mirror the other side's status, forward only: a closed referral is never reopened or re-closed."""
+    if status not in KNOWN_STATUSES:
+        return referral
+    if STATUS_RANK.get(status, CLOSED_RANK) <= STATUS_RANK.get(referral.status, CLOSED_RANK):
+        return referral
+    return _set_status(referral, status)
 
 
 def origin_referral_id(txn) -> str | None:

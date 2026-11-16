@@ -11,7 +11,17 @@ from care_ccn_be.protocol.actions import (
     CONTRACT_DRAFT,
 )
 from care_ccn_be.protocol.builder import ContractBuilder, Part
-from care_ccn_be.resources.beckn import Commitment, Contract, Descriptor, Offer, Participant, Quantity, Resource, Status
+from care_ccn_be.resources.beckn import (
+    Commitment,
+    Contract,
+    Descriptor,
+    Document,
+    Offer,
+    Participant,
+    Quantity,
+    Resource,
+    Status,
+)
 from care_ccn_be.resources.beckn.codes import ConsultationModality, ParticipantRole
 from care_ccn_be.resources.beckn.health import HealthParticipant, ServiceCategory
 from care_ccn_be.resources.referral.schema import (
@@ -19,8 +29,11 @@ from care_ccn_be.resources.referral.schema import (
     LIFECYCLE_ACTIVE,
     LIFECYCLE_FULFILLED,
     HealthReferral,
+    ReferralAttachment,
     ReferralBlock,
     ReferralContract,
+    ReferralFormResponse,
+    ReferralNote,
     ReferralPatient,
     TargetCriteria,
 )
@@ -30,6 +43,7 @@ from care_ccn_be.services import mappers
 from care_ccn_be.services.identifiers import health_ids_from_patient
 
 PATIENT_ROLE = ParticipantRole.PATIENT
+SOURCE_CATEGORY = "source"
 CATEGORY_FOR_TYPE = {mappers.REFERRAL_TYPE_CONSULTATION: "patient_care", mappers.REFERRAL_TYPE_LAB: "other"}
 TYPE_FOR_CATEGORY = {"patient_care": mappers.REFERRAL_TYPE_CONSULTATION}
 
@@ -349,6 +363,46 @@ class ReferralEcho(ContractBuilder):
     @classmethod
     def on_status(cls, message: dict[str, Any], referral, details=None) -> dict[str, Any]:
         return cls.overlay(message, referral, details)
+
+    @classmethod
+    def on_update(cls, message: dict[str, Any], referral, details=None) -> dict[str, Any]:
+        """The shared documents are not echoed back: the sender already has them."""
+        body = cls.overlay(message, referral, details)
+        (body["contract"].get("descriptor") or {}).pop("docs", None)
+        if body["contract"].get("descriptor") == {}:
+            body["contract"].pop("descriptor")
+        return body
+
+
+def sync_message(
+    coordination_id: str,
+    documents: list[Document],
+    attachments: list[ReferralAttachment],
+    responses: list[ReferralFormResponse],
+    status: str | None = None,
+    contract_id: str | None = None,
+    external_referral_id: str | None = None,
+) -> dict[str, Any]:
+    """What one side of a referral added since its last sync: files (``descriptor.docs[]``, source ones also as
+    the referral note's prior results), answered forms and, from the receiving side, the referral status."""
+    source_refs = [attachment.ref for attachment in attachments if attachment.category == SOURCE_CATEGORY]
+    attributes = HealthReferral(
+        coordination_id=coordination_id,
+        referral_note=ReferralNote(prior_result_refs=source_refs) if source_refs else None,
+        referral=ReferralBlock(
+            id=external_referral_id, status=status, attachments=attachments or None, responses=responses or None
+        ),
+    )
+    contract = Contract(
+        id=contract_id,
+        descriptor=Descriptor(docs=documents) if documents else None,
+        contract_attributes=attributes,
+    )
+    if status:
+        lifecycle = mappers.map_status_to_lifecycle(status)
+        attributes.lifecycle_state = lifecycle
+        contract.status = Status(code=LIFECYCLE_TO_CONTRACT_STATUS.get(lifecycle, CONTRACT_ACTIVE))
+    return {"contract": contract.dump()}
 
 
 def completion_message(coordination_id: str) -> dict[str, Any]:

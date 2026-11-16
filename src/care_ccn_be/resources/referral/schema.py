@@ -116,6 +116,28 @@ class ReferralPatient(BecknModel):
     health_ids: list[HealthId] | None = None
 
 
+class ReferralAttachment(BecknModel):
+    """Care extension: a shared file; ``ref`` is the label of its ``Descriptor.docs[]`` entry."""
+
+    ref: str
+    category: str | None = None  # Care's ReferralResource attachment_type: source / metadata / response
+    name: str | None = None
+    extension: str | None = None
+
+
+class ReferralFormResponse(BecknModel):
+    """Care extension: a questionnaire answered on the referral, with the questionnaire as it was answered."""
+
+    ref: str
+    questionnaire_type: str | None = None
+    status: str | None = None
+    revision: int | None = None
+    questionnaire: dict[str, Any] | None = None
+    questionnaire_response: dict[str, Any] | None = None
+    created_at: IsoDateTime | None = None
+    author: str | None = None
+
+
 class ReferralBlock(BecknModel):
     """Care extension: the state of the Care referral, overlaid by the BPP on its callbacks."""
 
@@ -129,6 +151,8 @@ class ReferralBlock(BecknModel):
     referral_type: str | None = None
     origin_facility_id: str | None = None
     patient: ReferralPatient | None = None
+    attachments: list[ReferralAttachment] | None = None
+    responses: list[ReferralFormResponse] | None = None
 
 
 class HealthReferral(JsonLdModel):

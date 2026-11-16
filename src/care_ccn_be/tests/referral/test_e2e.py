@@ -52,6 +52,7 @@ class ReferralLoopbackTests(ReferralTestBase):
         poll = self.poll(txn_id)
         self.assertEqual(poll["referral_id"], str(origin_referral.external_id))
         self.assertEqual(poll["contract_id"], str(assigned_referral.external_id))
+        self.assertEqual(self.poll(str(origin_referral.external_id))["transaction_id"], txn_id)
         self.assertEqual(
             poll["actions"],
             [

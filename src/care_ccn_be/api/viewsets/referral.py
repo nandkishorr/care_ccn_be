@@ -1,6 +1,9 @@
 """Referral APIs: BAP and BPP behavior in one flow viewset."""
 
 from typing import Any
+from uuid import UUID
+
+from care.utils.shortcuts import get_object_or_404
 
 from care_ccn_be import store
 from care_ccn_be.api.viewsets.base import (
@@ -12,10 +15,13 @@ from care_ccn_be.api.viewsets.base import (
     InitMixin,
     SelectMixin,
     StatusMixin,
+    UpdateMixin,
 )
 from care_ccn_be.exceptions import BecknError
 from care_ccn_be.flows.defaults import cc_endpoint
 from care_ccn_be.flows.referral import ReferralFlow
+from care_ccn_be.models import Adapter
+from care_ccn_be.models.referral import ReferralLink
 from care_ccn_be.protocol.actions import CONFIRM, CONTRACT_ACTIVE, CONTRACT_COMPLETED, INIT
 from care_ccn_be.resources.builders.referral import (
     CATEGORY_FOR_TYPE,
@@ -37,7 +43,7 @@ from care_ccn_be.resources.referral.spec import (
 from care_ccn_be.services import availability as availabilities
 from care_ccn_be.services import encounter as encounters
 from care_ccn_be.services import facility as facilities
-from care_ccn_be.services import mappers
+from care_ccn_be.services import mappers, referral_sync
 from care_ccn_be.services import patient as patients
 from care_ccn_be.services import referral as lifecycle
 from care_ccn_be.services.patient import find_or_create_patient
@@ -111,6 +117,7 @@ class ReferralViewSet(
     InitMixin,
     ConfirmMixin,
     StatusMixin,
+    UpdateMixin,
     BecknViewSet,
 ):
     flow = ReferralFlow
@@ -121,12 +128,43 @@ class ReferralViewSet(
     init_spec = ReferralInitSpec
     confirm_spec = ReferralConfirmSpec
     status_spec = ReferralStatusSpec
+    update_spec = ReferralStatusSpec  # passthrough only; Care sends its own updates from the referral signals
 
     on_select_spec = ReferralMessage
     on_init_spec = ReferralMessage
     on_confirm_spec = ReferralMessage
     on_status_spec = ReferralMessage
+    on_update_spec = ReferralMessage
     on_discover_spec = None  # the coordination centre publishes the referral catalog, not Care
+
+    def get_object(self):
+        queryset = self.get_queryset()
+        identifier = self.kwargs[self.lookup_field]
+        txn = queryset.filter(transaction_id=identifier).first()
+        if txn is not None:
+            return txn
+        if self.adapter == Adapter.BAP:
+            try:
+                referral_id = UUID(identifier)
+            except ValueError:
+                pass
+            else:
+                link = (
+                    ReferralLink.objects.filter(
+                        referral__external_id=referral_id,
+                        referral__deleted=False,
+                        transaction__flow=self.flow.name,
+                        role=lifecycle.ORIGIN,
+                        active=True,
+                    )
+                    .select_related("transaction")
+                    .order_by("pk")
+                    .first()
+                )
+                if link is not None:
+                    coordination_id = lifecycle.coordination_of(link.transaction)
+                    return get_object_or_404(queryset, coordination_id=coordination_id)
+        return get_object_or_404(queryset, transaction_id=identifier)
 
     # ------------------------------------------------------------------ BAP
     def perform_discover(self, request_obj, txn, msg) -> None:
@@ -176,9 +214,14 @@ class ReferralViewSet(
         if existing is not None:
             lifecycle.link_encounter(existing, encounters.by_external_id((params or {}).get("encounter")))
             lifecycle.approve(existing)
-            return
-        if params:
-            self.ensure_origin(call, params, approved=True)
+        elif params:
+            existing = self.ensure_origin(call, params, approved=True)
+        if existing is not None:
+            link = lifecycle.current_link(lifecycle.coordination_of(call.txn), lifecycle.ORIGIN)
+            if link is None:
+                raise RuntimeError("confirmed origin referral has no active network link")
+            lifecycle.remember_confirmation(link, call.message)
+            referral_sync.schedule(existing.pk)
 
     def build_status(self, request_obj, txn, state):
         return {"contract": {"id": txn.contract_id or txn.transaction_id}}
@@ -187,6 +230,12 @@ class ReferralViewSet(
         self.complete_if_fulfilled(call)
 
     def on_update(self, call: CallbackCall) -> None:
+        """The receiving side's files, answered forms and status are mirrored onto the origin referral."""
+        if call.error:
+            return
+        origin = lifecycle.current(lifecycle.coordination_of(call.txn), lifecycle.ORIGIN)
+        if origin is not None:
+            referral_sync.receive(origin, call.message, mirror_status=True)
         self.complete_if_fulfilled(call)
 
     def remember_params(self, action_name: str, request_obj, txn) -> None:
@@ -217,7 +266,7 @@ class ReferralViewSet(
             lifecycle.complete(lifecycle.coordination_of(call.txn), lifecycle.ORIGIN)
 
     @staticmethod
-    def ensure_origin(call: CallbackCall, params: dict, approved: bool) -> None:
+    def ensure_origin(call: CallbackCall, params: dict, approved: bool):
         facility = facilities.by_external_id(params.get("facility"))
         if facility is None:
             raise MissingFacility("facility is required to create the referral")
@@ -239,7 +288,7 @@ class ReferralViewSet(
             origin_facility_id=str(facility.external_id),
             encounter=encounter,
         )
-        lifecycle.ensure_referral(txn, lifecycle.ORIGIN, data, approved=approved)
+        return lifecycle.ensure_referral(txn, lifecycle.ORIGIN, data, approved=approved)
 
     # ------------------------------------------------------------------ BPP
     def perform_on_select(self, request_obj, call: BppCall) -> dict[str, Any]:
@@ -270,6 +319,14 @@ class ReferralViewSet(
         if link is None:
             raise BecknError(NOT_FOUND, "Referral not found for status")
         return ReferralEcho.on_status(call.message, link.referral, link.details)
+
+    def perform_on_update(self, request_obj, call: BppCall) -> dict[str, Any]:
+        """The referring side's files and answered forms are mirrored onto the assigned referral."""
+        link = lifecycle.current_link(lifecycle.coordination_of(call.txn), lifecycle.ASSIGNED)
+        if link is None:
+            raise BecknError(NOT_FOUND, "Referral not found for update")
+        referral_sync.receive(link.referral, call.message, mirror_status=False)
+        return ReferralEcho.on_update(call.message, link.referral, link.details)
 
     @staticmethod
     def _facilities(call: BppCall):

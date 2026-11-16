@@ -103,6 +103,10 @@ DEFAULTS = {
     "BECKN_SHARED_SECRET": "",
     "BECKN_CELERY_QUEUE": "",
     "BECKN_CALLBACK_REUSE_MESSAGE_ID": True,
+    # referral files shared with the other instance
+    "BECKN_ARTIFACT_URL_TTL": 3600,
+    "BECKN_ARTIFACT_MAX_BYTES": 25 * 1024 * 1024,
+    "BECKN_ARTIFACT_ALLOWED_HOSTS": [],  # hosts files may be downloaded from; empty refuses every download
 }
 
 plugin_settings = PluginSettings(PLUGIN_NAME, defaults=DEFAULTS, required_settings=REQUIRED_SETTINGS)

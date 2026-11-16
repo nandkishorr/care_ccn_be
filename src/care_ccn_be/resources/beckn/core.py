@@ -3,10 +3,26 @@
 from care_ccn_be.resources.beckn.base import Attributes, BecknModel
 
 
+class Document(BecknModel):
+    """A ``Descriptor.docs[]`` entry; DHP examples identify it by ``label`` or ``id``, so both are sent."""
+
+    id: str | None = None
+    label: str | None = None
+    name: str | None = None
+    url: str | None = None
+    mime_type: str | None = None
+    standard: str | None = None
+
+    @property
+    def ref(self) -> str | None:
+        return self.label or self.id
+
+
 class Descriptor(BecknModel):
     code: str | None = None
     name: str | None = None
     short_desc: str | None = None
+    docs: list[Document] | None = None
 
 
 class Status(BecknModel):
