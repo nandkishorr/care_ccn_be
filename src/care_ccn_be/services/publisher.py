@@ -5,12 +5,14 @@ from typing import Any
 
 from django.db import transaction
 
-from care_ccn_be import store
+from care_ccn_be import adapter, store
 from care_ccn_be.exceptions import BecknError
 from care_ccn_be.models import BecknMessage
 
 CATALOG_TYPE = "REGULAR"
-UPDATE_MODE = "FULL"
+UPDATE_MODE_FULL = "FULL"  # the published catalog replaces the registry's copy
+UPDATE_MODE_MERGE = "MERGE"  # resources and offers are upserted into the registry's copy, by id
+UPDATE_MODE = UPDATE_MODE_FULL
 
 
 @dataclass
@@ -18,6 +20,8 @@ class PublishSpec:
     """Input handed to a flow's ``CatalogBuilder``."""
 
     public_only: bool = True
+    # only these facilities (pks); a builder that scopes catalogs by facility builds one for each, even if empty
+    facility_ids: list[int] | None = None
 
 
 @dataclass
@@ -40,26 +44,35 @@ def build_catalogs(flow, spec: PublishSpec) -> list[dict[str, Any]]:
     return [catalog for catalog in catalogs if catalog]
 
 
-def build_publish_payload(flow, public_only: bool = True) -> dict[str, Any]:
-    catalogs = build_catalogs(flow, PublishSpec(public_only=public_only))
+def build_publish_payload(
+    flow, public_only: bool = True, facility_ids: list[int] | None = None, update_mode: str = UPDATE_MODE
+) -> dict[str, Any]:
+    catalogs = build_catalogs(flow, PublishSpec(public_only=public_only, facility_ids=facility_ids))
     context = flow.context().publish()
-    visible_to = [context["networkId"]] if context.get("networkId") else []
+    visible_to = adapter.catalog_visible_to(context.get("networkId"))
     for catalog in catalogs:
         catalog.setdefault("bppId", context.get("bppId"))
         catalog.setdefault("bppUri", context.get("bppUri"))
     directives = [
-        {"catalogId": catalog["id"], "catalogType": CATALOG_TYPE, "updateMode": UPDATE_MODE, "visibleTo": visible_to}
+        {"catalogId": catalog["id"], "catalogType": CATALOG_TYPE, "updateMode": update_mode, "visibleTo": visible_to}
         for catalog in catalogs
         if catalog.get("id")
     ]
     return {"context": context, "message": {"catalogs": catalogs, "publishDirectives": directives}}
 
 
-def publish_catalog(flow, public_only: bool = True, dry_run: bool = False) -> PublishResult:
-    """Record the ``catalog/publish`` message and queue its delivery; ``dry_run`` only builds the payload."""
-    payload = build_publish_payload(flow, public_only)
+def publish_catalog(
+    flow,
+    public_only: bool = True,
+    dry_run: bool = False,
+    facility_ids: list[int] | None = None,
+    update_mode: str = UPDATE_MODE,
+) -> PublishResult:
+    """Record the ``catalog/publish`` message and queue its delivery; ``dry_run`` only builds the payload, and so
+    does a facility-scoped publish that built no catalog (nothing to send)."""
+    payload = build_publish_payload(flow, public_only, facility_ids, update_mode)
     catalogs = payload["message"]["catalogs"]
-    if dry_run:
+    if dry_run or (facility_ids is not None and not catalogs):
         return PublishResult(flow.name, payload, None, catalogs)
     with transaction.atomic():
         message = store.record_outbound(None, payload["context"], payload["message"])

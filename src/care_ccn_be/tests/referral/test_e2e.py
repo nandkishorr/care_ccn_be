@@ -12,6 +12,73 @@ from care_ccn_be.tests.referral.base import ReferralTestBase
 class ReferralLoopbackTests(ReferralTestBase):
     """Care is the BAP, the network and the coordinating centre at once."""
 
+    def setUp(self):
+        super().setUp()
+        self.receiving_availability(self.target, "lab")
+
+    def test_select_forms_then_init_errors_then_confirm_and_the_response_comes_back(self):
+        from care.emr.models.referral import ReferralQuestionnaireResponse
+
+        from care_ccn_be.services import availability as availabilities
+
+        request_form = self.referral_questionnaire()
+        response_form = self.referral_questionnaire("Referral Response Form", "Emergency Response")
+        self.map_questionnaire(self.receiving, request_form, "request")
+        self.map_questionnaire(self.receiving, response_form, "response")
+        self.loopback(nack_actions=("discover",))
+        txn_id = self.bap().json()["transaction_id"]
+        self.on_discover(txn_id, bppId="bpp.care", bppUri="http://bpp.care")
+        patient = self.create_patient(name="Ravi", gender="male")
+
+        self.bap(txn_id, "select", {"offer_id": f"offer-{self.receiving.external_id}"})
+        availability = self.poll(txn_id)["availability"]
+        self.assertEqual(
+            [item["questionnaire"]["id"] for item in availability["questionnaires"]],
+            [str(request_form.external_id), str(response_form.external_id)],
+        )
+
+        body = {"facility": str(self.origin.external_id), "patient": str(patient.external_id), "title": "Heart"}
+        self.assertEqual(self.bap(txn_id, "init", body).status_code, 400)
+        wrong = {"results": [{"question_id": str(response_form.questions[0]["id"]), "values": [{"value": "x"}]}]}
+        self.bap(
+            txn_id, "init", {**body, "questionnaire": str(request_form.external_id), "questionnaire_response": wrong}
+        )
+        poll = self.poll(txn_id)
+        self.assertEqual((poll["status"], poll["last_error"]["code"]), ("ERROR", "70007"))
+
+        answered = {
+            **body,
+            "questionnaire": str(request_form.external_id),
+            "questionnaire_response": self.answers(request_form),
+        }
+        self.bap(txn_id, "init", answered)
+        self.assertEqual(self.bap_txn(txn_id).status, "ON_INIT")
+        self.assertFalse(Referral.objects.exists())
+
+        self.bap(txn_id, "confirm", answered)
+        self.assertEqual(self.bap_txn(txn_id).status, "ON_CONFIRM")
+        origin = lifecycle.current(txn_id, "origin")
+        assigned = lifecycle.current(txn_id, "assigned")
+        self.assertEqual(assigned.availability, self.receiving)
+        sent = ReferralQuestionnaireResponse.objects.get(referral=assigned)
+        self.assertEqual((sent.questionnaire, sent.questionnaire_type), (request_form, "request"))
+        kept = ReferralQuestionnaireResponse.objects.get(referral=origin)
+        self.assertEqual((kept.questionnaire_type, kept.meta), ("request", {"ccn_ref": f"request-{txn_id}"}))
+
+        ReferralQuestionnaireResponse.objects.create(
+            referral=assigned,
+            questionnaire=response_form,
+            questionnaire_response=self.answers(response_form, "Admitted to ICU"),
+            questionnaire_snapshot=availabilities.snapshot(response_form),
+            questionnaire_type="response",
+            created_by=self.user,
+        )
+        returned = ReferralQuestionnaireResponse.objects.get(referral=origin, questionnaire_type="response")
+        self.assertEqual(returned.questionnaire_snapshot["title"], "Referral Response Form")
+        self.assertEqual(returned.questionnaire_response["results"][0]["values"], [{"value": "Admitted to ICU"}])
+        self.assertEqual(ReferralQuestionnaireResponse.objects.filter(referral=assigned).count(), 2)
+        self.assertFalse(BecknMessage.objects.filter(processing_status="failed", action="on_update").exists())
+
     def test_discover_select_init_confirm_status(self):
         self.loopback(nack_actions=("discover",))
         txn_id = self.bap().json()["transaction_id"]
@@ -30,7 +97,7 @@ class ReferralLoopbackTests(ReferralTestBase):
         }
         self.bap(txn_id, "init", init)
         self.assertEqual(self.bap_txn(txn_id).status, "ON_INIT")
-        self.assertEqual(Referral.objects.get().status, "pending")
+        self.assertFalse(Referral.objects.exists())
 
         self.bap(txn_id, "confirm", init)
         self.assertEqual((self.bap_txn(txn_id).status, self.bpp_txn(txn_id).status), ("ON_CONFIRM", "ON_CONFIRM"))

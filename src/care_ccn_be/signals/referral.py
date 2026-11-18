@@ -5,7 +5,12 @@ import logging
 from uuid import UUID
 
 from care.emr.models.file_upload import FileUpload
-from care.emr.models.referral import Referral, ReferralQuestionnaireResponse, ReferralResource
+from care.emr.models.referral import (
+    Referral,
+    ReferralAvailability,
+    ReferralQuestionnaireResponse,
+    ReferralResource,
+)
 from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -17,7 +22,7 @@ from care_ccn_be.models.referral import ReferralLink
 from care_ccn_be.services import artifacts, referral_sync
 from care_ccn_be.services import availability as availabilities
 from care_ccn_be.settings import plugin_settings
-from care_ccn_be.tasks.referral import complete_referral, submit_referral
+from care_ccn_be.tasks.referral import complete_referral, publish_referral_catalog, submit_referral
 
 logger = logging.getLogger(__name__)
 
@@ -119,3 +124,20 @@ def file_uploaded(sender, instance, **kwargs):
 def form_answered(sender, instance, created, **kwargs):
     if created and active():
         sync_if_linked(instance.referral_id)
+
+
+@receiver(post_save, sender=ReferralAvailability, dispatch_uid="care_ccn_be.referral.availability_changed")
+def availability_changed(sender, instance, **kwargs):
+    """A created or changed receiving availability (status, visibility, name, deletion) publishes the coordinator
+    catalog of its facility."""
+    if not (
+        active()
+        and plugin_settings.BECKN_REFERRAL_CATALOG_AUTO_PUBLISH
+        and instance.entity_type in availabilities.RECEIVING_TYPES
+    ):
+        return
+    facility = availabilities.facility_of(instance)
+    if facility is None:
+        return
+    facility_id, availability_id = facility.pk, instance.pk
+    transaction.on_commit(lambda: publish_referral_catalog.delay(facility_id, availability_id))

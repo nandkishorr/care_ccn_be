@@ -1,4 +1,7 @@
-from care.emr.models.referral import Referral
+import uuid
+
+from care.emr.models.questionnaire import Questionnaire
+from care.emr.models.referral import Referral, ReferralAvailability, ReferralAvailabilityQuestionnaire
 from django.test import override_settings
 from model_bakery import baker
 
@@ -8,7 +11,12 @@ from care_ccn_be.services import availability as availabilities
 from care_ccn_be.tests.framework.base import PLUGIN, FrameworkTestBase, inbound_callback, inbound_request
 
 CC = {"BECKN_CC_BPP_ID": "cc.bpp", "BECKN_CC_BPP_URI": "http://cc.bpp"}
-REFERRAL_PLUGIN = {**PLUGIN, **CC, "BECKN_ENABLED_FLOWS": ["referral"]}
+REFERRAL_PLUGIN = {
+    **PLUGIN,
+    **CC,
+    "BECKN_ENABLED_FLOWS": ["referral"],
+    "BECKN_REFERRAL_CATALOG_AUTO_PUBLISH": False,
+}
 
 
 @override_settings(ROOT_URLCONF="care_ccn_be.tests.referral.urls", PLUGIN_CONFIGS={"care_ccn_be": REFERRAL_PLUGIN})
@@ -18,6 +26,47 @@ class ReferralTestBase(FrameworkTestBase):
         self.system = self.create_user(username="beckn_system")
         self.origin = self.create_facility(self.user)
         self.target = self.create_facility(self.user)
+        self.receiving = self.receiving_availability(self.target)
+
+    def receiving_availability(self, facility, referral_type="consultation", **kwargs):
+        """An active, public availability ``facility`` receives network referrals on."""
+        defaults = {
+            "entity_type": "facility",
+            "facility": facility,
+            "status": "active",
+            "is_public": True,
+            "name": f"{referral_type.title()} desk",
+            "description": "",
+            "referral_type": referral_type,
+            "care_team": [],
+            "external_entity": {},
+        }
+        return baker.make(ReferralAvailability, **{**defaults, **kwargs})
+
+    def referral_questionnaire(self, title="Referral Request Form", text="Emergency Care", required=True):
+        question_id = str(uuid.uuid4())
+        return baker.make(
+            Questionnaire,
+            slug=f"q-{uuid.uuid4().hex[:12]}",
+            version="0.1",
+            title=title,
+            description="",
+            status="active",
+            subject_type="referral",
+            styling_metadata={},
+            questions=[{"id": question_id, "text": text, "type": "string", "link_id": "Q_1", "required": required}],
+            actions=[],
+        )
+
+    def map_questionnaire(self, availability, questionnaire, questionnaire_type="request"):
+        return ReferralAvailabilityQuestionnaire.objects.create(
+            availability=availability, questionnaire=questionnaire, questionnaire_type=questionnaire_type
+        )
+
+    @staticmethod
+    def answers(questionnaire, value="Oxygen given"):
+        question = questionnaire.questions[0]
+        return {"results": [{"question_id": question["id"], "values": [{"value": value}]}]}
 
     def bap(self, txn_id=None, action="discover", body=None, client=None):
         url = "/bap/referral/discover/" if action == "discover" else f"/bap/referral/{txn_id}/{action}/"

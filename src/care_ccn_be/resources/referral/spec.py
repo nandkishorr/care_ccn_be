@@ -20,6 +20,8 @@ __all__ = ["FACILITY_REQUIRED", "OFFER_REQUIRED"]
 
 class ReferralState(FlowState):
     offer_id: str | None = None
+    # the availability (and its form snapshots) the BPP returned on on_select
+    availability: dict | None = None
     init: dict | None = None
     confirm: dict | None = None
 
@@ -47,6 +49,9 @@ class ReferralRequestSpec(BapActionSpec):
     assigned_facility_id: str | None = None
     emergency: bool = False
     priority: int | None = None
+    # the answered request form of the selected availability (Care's QuestionnaireResponseSubmission shape)
+    questionnaire: UUID4 | None = None
+    questionnaire_response: dict[str, Any] | None = None
 
 
 class ReferralStatusSpec(BapActionSpec):
@@ -63,6 +68,7 @@ class ReferralConfirmSpec(ReferralRequestSpec):
 
 class ReferralTransactionRetrieveSpec(BecknTransactionRetrieveSpec):
     referral_id: UUID4 | None = None
+    availability: dict[str, Any] | None = None
     confirm: dict[str, Any] | None = None
 
     @classmethod
@@ -71,4 +77,5 @@ class ReferralTransactionRetrieveSpec(BecknTransactionRetrieveSpec):
 
         super().perform_extra_serialization(mapping, obj, *args, **kwargs)
         mapping["referral_id"] = lifecycle.origin_referral_id(obj)
+        mapping["availability"] = (obj.state or {}).get("availability")
         mapping["confirm"] = (obj.state or {}).get("confirm")

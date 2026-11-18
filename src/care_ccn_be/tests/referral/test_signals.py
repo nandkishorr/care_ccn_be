@@ -59,9 +59,9 @@ class ReferralSignalTests(ReferralTestBase):
         self.assertEqual(attributes["facilityId"], str(self.origin.external_id))
 
     def test_other_availabilities_statuses_and_updates_are_ignored(self):
-        self.make(availability=availabilities.for_facility(self.target))
+        self.make(availability=self.receiving)
         self.make(status="in_progress")
-        referral = self.make(availability=availabilities.for_facility(self.origin))
+        referral = self.make(availability=self.receiving_availability(self.origin))
         self.sent.clear()
         referral.title = "changed"
         referral.save()
@@ -99,7 +99,7 @@ class ReferralSignalTests(ReferralTestBase):
     def test_the_task_skips_referrals_that_are_not_for_the_network(self):
         from care_ccn_be.tasks.referral import submit_referral
 
-        referral = self.create_referral(availability=availabilities.for_facility(self.target))
+        referral = self.create_referral(availability=self.receiving)
         self.assertEqual(submit_referral(referral.pk), "skipped")
         self.assertFalse(BecknTransaction.objects.exists())
 

@@ -142,6 +142,26 @@ def sync_referral(referral_id: int) -> str:
     return "sent"
 
 
+@shared_task(name="care_ccn_be.referral.publish_catalog")
+def publish_referral_catalog(facility_id: int | None = None, availability_id: int | None = None) -> str:
+    """Publish the coordinator catalog of ``facility_id`` (every facility's when ``None``, as a full update).
+
+    The catalog keeps its id: while ``availability_id`` is published it is merged into the facility's catalog
+    already on the network (added, or updated in place); once withdrawn (private, inactive or deleted) the
+    facility's catalog is replaced so it drops out."""
+    from care_ccn_be.services.publisher import UPDATE_MODE_FULL, UPDATE_MODE_MERGE, publish_catalog
+
+    if facility_id is None:
+        result = publish_catalog(ReferralFlow)
+        return f"queued {len(result.catalogs)}"
+    listed = (
+        availability_id is not None and availabilities.receiving(public_only=True).filter(pk=availability_id).exists()
+    )
+    mode = UPDATE_MODE_MERGE if listed else UPDATE_MODE_FULL
+    result = publish_catalog(ReferralFlow, facility_ids=[facility_id], update_mode=mode)
+    return f"queued {len(result.catalogs)} ({mode})" if result.message else "skipped"
+
+
 @shared_task(
     name="care_ccn_be.referral.import_file",
     autoretry_for=(requests.RequestException,),

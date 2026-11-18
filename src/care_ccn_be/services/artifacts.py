@@ -1,6 +1,7 @@
 """Referral files shared over the network: sent as signed read URLs in ``Descriptor.docs[]``, received by downloading
 them into Care's own bucket. Received rows carry ``ccn_ref`` so they are never sent back."""
 
+import ipaddress
 import logging
 import re
 from functools import partial
@@ -83,16 +84,41 @@ def schedule_imports(referral, message: dict[str, Any]) -> None:
             transaction.on_commit(partial(import_referral_file.delay, referral.pk, document, attachment))
 
 
-def download(url: str) -> bytes:
-    """Fetch a shared document. Only allow-listed hosts (over https unless DEBUG) and bounded sizes are accepted,
-    so a peer cannot point Care at internal services or exhaust its memory."""
+def check_url(url: str) -> None:
+    """Only https URLs with a host may be fetched; DEBUG also accepts http and localhost."""
     parsed = urlparse(url or "")
     schemes = ("https", "http") if settings.DEBUG else ("https",)
     if parsed.scheme not in schemes or not parsed.hostname:
         raise ArtifactRejected(f"unsupported document url scheme {parsed.scheme!r}")
-    allowed = {host.lower() for host in plugin_settings.BECKN_ARTIFACT_ALLOWED_HOSTS}
-    if parsed.hostname.lower() not in allowed:
-        raise ArtifactRejected(f"{parsed.hostname} is not an allowed artifact host")
+    if not settings.DEBUG and is_local(parsed.hostname):
+        raise ArtifactRejected(f"{parsed.hostname} is only allowed when DEBUG is on")
+
+
+def is_local(hostname: str) -> bool:
+    hostname = hostname.lower().rstrip(".")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def check_incoming(referral, message: dict[str, Any]) -> None:
+    """Reject a received message whose new documents could never be downloaded (checks needing no network)."""
+    for document, attachment in incoming(message):
+        if imported(referral, attachment["ref"]):
+            continue
+        try:
+            validate(document, attachment)
+            check_url(document.get("url"))
+        except ArtifactRejected as exc:
+            raise ArtifactRejected(f"document {attachment['ref']}: {exc}") from exc
+
+
+def download(url: str) -> bytes:
+    """Fetch a shared document; bounded sizes only, so a peer cannot exhaust Care's memory."""
+    check_url(url)
     limit = plugin_settings.BECKN_ARTIFACT_MAX_BYTES
     timeout = plugin_settings.BECKN_HTTP_TIMEOUT
     with requests.get(url, stream=True, timeout=timeout, allow_redirects=False) as response:

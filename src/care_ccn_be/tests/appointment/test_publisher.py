@@ -32,10 +32,22 @@ class PublisherTests(AppointmentTestBase):
                     "catalogId": catalog["id"],
                     "catalogType": "REGULAR",
                     "updateMode": "FULL",
-                    "visibleTo": ["nfh-test"],
+                    "visibleTo": [
+                        "nfh-test",
+                        "be",
+                        "nfh.global/beckn-nodes",
+                        "beckn.one/testnet",
+                        "nfh.global/testnet",
+                    ],
                 }
             ],
         )
+
+    def test_catalog_visibility_networks_are_configurable(self):
+        plugin = {**APPOINTMENT_PLUGIN, "BECKN_CATALOG_VISIBLE_TO": ["nfh-test", "other.net"]}
+        with override_settings(PLUGIN_CONFIGS={"care_ccn_be": plugin}):
+            (directive,) = build_publish_payload(AppointmentFlow)["message"]["publishDirectives"]
+        self.assertEqual(directive["visibleTo"], ["nfh-test", "other.net"])
 
     def test_dry_run_records_and_sends_nothing(self):
         self.stub_delivery()

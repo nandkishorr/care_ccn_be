@@ -26,7 +26,7 @@ from care_ccn_be.resources.beckn.health import (
     SubSpecialty,
 )
 
-DISCOVER_SCHEMA_CONTEXT = V21.format("HealthResource")
+DISCOVER_SCHEMA_CONTEXT = V21.format("ServiceCoordinationResource")
 
 HEALTH_SERVICE_PHARMACY_DISPENSING = HealthServiceType.PHARMACY_DISPENSING
 LIFECYCLE_ACTIVE = ReferralLifecycleState.ACTIVE
@@ -138,6 +138,39 @@ class ReferralFormResponse(BecknModel):
     author: str | None = None
 
 
+class AvailabilityQuestionnaire(BecknModel):
+    """Care extension: a form of a referral availability, ``questionnaire`` is Care's questionnaire snapshot."""
+
+    questionnaire_type: str
+    questionnaire: dict[str, Any]
+
+
+class ReferralAvailabilityBlock(BecknModel):
+    """Care extension: the receiving availability the referral is raised on and the forms it asks for."""
+
+    id: str
+    name: str | None = None
+    description: str | None = None
+    referral_type: str | None = None
+    facility_id: str | None = None
+    facility_name: str | None = None
+    questionnaires: list[AvailabilityQuestionnaire] | None = None
+
+    def questionnaire(self, questionnaire_id, questionnaire_type: str | None = None) -> dict[str, Any] | None:
+        for item in self.questionnaires or []:
+            if str(item.questionnaire.get("id")) == str(questionnaire_id) and questionnaire_type in (
+                None,
+                item.questionnaire_type,
+            ):
+                return item.questionnaire
+        return None
+
+    def of_type(self, questionnaire_type: str) -> list[dict[str, Any]]:
+        return [
+            item.questionnaire for item in self.questionnaires or [] if item.questionnaire_type == questionnaire_type
+        ]
+
+
 class ReferralBlock(BecknModel):
     """Care extension: the state of the Care referral, overlaid by the BPP on its callbacks."""
 
@@ -153,6 +186,7 @@ class ReferralBlock(BecknModel):
     patient: ReferralPatient | None = None
     attachments: list[ReferralAttachment] | None = None
     responses: list[ReferralFormResponse] | None = None
+    availability: ReferralAvailabilityBlock | None = None
 
 
 class HealthReferral(JsonLdModel):

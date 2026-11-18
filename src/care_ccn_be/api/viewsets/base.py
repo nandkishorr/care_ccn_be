@@ -44,7 +44,10 @@ from care_ccn_be.resources.transaction.spec import BecknTransactionListSpec, Bec
 
 def beckn_exception_handler(exc, context):
     if isinstance(exc, BecknError):
-        return Response({"errors": [{"type": "beckn_error", "code": exc.code, "msg": exc.message}]}, status=400)
+        error = {"type": "beckn_error", "code": exc.code, "msg": exc.message}
+        if exc.paths:
+            error["paths"] = exc.paths
+        return Response({"errors": [error]}, status=400)
     return emr_exception_handler(exc, context)
 
 

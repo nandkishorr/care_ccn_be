@@ -250,6 +250,16 @@ class CoordinationScope(BecknModel):
     geography_scope: list[CodedValue] | None = None
 
 
+class CatalogReferralAvailability(BecknModel):
+    """Care extension: the Care ``ReferralAvailability`` a referral catalog resource stands for."""
+
+    id: str
+    referral_type: str | None = None
+    entity_type: str | None = None
+    organization_id: str | None = None
+    organization_name: str | None = None
+
+
 class ServiceCoordinationResource(ServiceResource):
     LD_TYPE = "scres:ServiceCoordinationResource"
     LD_CONTEXT = V21.format("ServiceCoordinationResource")
@@ -257,6 +267,24 @@ class ServiceCoordinationResource(ServiceResource):
     coordination_scope: CoordinationScope | None = None
     acceptance_mode: Code[CoordinationAcceptanceMode] | None = None
     supported_urgency_tiers: list[Code[UrgencyTier]] | None = None
+    # Care extension; not part of ServiceCoordinationResource v2.1
+    referral_availability: CatalogReferralAvailability | None = None
+
+
+class CoordinationSlaWindow(BecknModel):
+    clinical_urgency_tier: Code[UrgencyTier]
+    lapse_window_hours: int | None = None
+    sla_breach_window_hours: int | None = None
+
+
+class ServiceCoordinationOffer(ServiceOffer):
+    LD_TYPE = "scoff:ServiceCoordinationOffer"
+    LD_CONTEXT = V21.format("ServiceCoordinationOffer")
+
+    coordination_sla_windows: list[CoordinationSlaWindow] | None = None
+    retry_policy: str | None = None
+    handoff_supported: bool | None = None
+    max_active_referrals: int | None = None
 
 
 __all__ = [
@@ -264,10 +292,12 @@ __all__ = [
     "V21",
     "AvailabilitySlot",
     "CancellationPolicy",
+    "CatalogReferralAvailability",
     "CodedValue",
     "Consent",
     "ConsentClass",
     "CoordinationScope",
+    "CoordinationSlaWindow",
     "CoverageArea",
     "DeviationReasonCode",
     "HealthContract",
@@ -282,6 +312,7 @@ __all__ = [
     "Scheme",
     "ServiceCategory",
     "ServiceContract",
+    "ServiceCoordinationOffer",
     "ServiceCoordinationResource",
     "ServiceLocation",
     "ServiceOffer",

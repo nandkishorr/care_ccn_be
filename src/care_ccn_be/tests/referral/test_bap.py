@@ -1,16 +1,166 @@
 import uuid
 
 from care.emr.models import Encounter
-from care.emr.models.referral import Referral
+from care.emr.models.referral import Referral, ReferralQuestionnaireResponse
 from django.urls import Resolver404, resolve
 from model_bakery import baker
 
 from care_ccn_be.models import BecknMessage, Direction
 from care_ccn_be.models.referral import ReferralLink
+from care_ccn_be.services import availability as availabilities
 from care_ccn_be.services import referral as lifecycle
 from care_ccn_be.tests.referral.base import ReferralTestBase
 
 ROOT_URLCONF = "care_ccn_be.tests.referral.urls"
+REMOTE_AVAILABILITY = "6f1c2b8e-1d0a-4c55-9a51-6d7bde3a2a10"
+REMOTE_FACILITY = "0b6f0d55-5a54-4b8f-9d1e-2b7e1e3b9c01"
+QUESTION = "8d3c8a51-2c3e-4f7a-b5f4-0f8b5b7f2c11"
+REQUEST_FORM = {
+    "id": "2a5d1f4e-7b1c-4d2a-9e6f-3c8b7a6d5e41",
+    "slug": "referral-request-form",
+    "version": "0.1",
+    "title": "Referral Request Form",
+    "status": "active",
+    "subject_type": "referral",
+    "internal_revision": 3,
+    "questions": [{"id": QUESTION, "text": "Emergency Care", "type": "string", "link_id": "Q_af640a89"}],
+}
+RESPONSE_FORM = {
+    **REQUEST_FORM,
+    "id": "9c4e2b1a-5d6f-4a3b-8c7d-1e2f3a4b5c62",
+    "slug": "referral-response-form1",
+    "title": "Referral Response Form",
+    "questions": [{"id": str(uuid.uuid5(uuid.NAMESPACE_URL, "r")), "text": "Emergency Response", "type": "string"}],
+}
+ANSWERS = {"results": [{"question_id": QUESTION, "values": [{"value": "Oxygen given"}]}]}
+
+
+def on_select_message():
+    return {
+        "contract": {
+            "status": {"code": "DRAFT"},
+            "contractAttributes": {
+                "@type": "hrf:HealthReferral",
+                "referral": {
+                    "availability": {
+                        "id": REMOTE_AVAILABILITY,
+                        "name": "Cardiology desk",
+                        "referralType": "consultation",
+                        "facilityId": REMOTE_FACILITY,
+                        "facilityName": "Medicity",
+                        "questionnaires": [
+                            {"questionnaireType": "request", "questionnaire": REQUEST_FORM},
+                            {"questionnaireType": "response", "questionnaire": RESPONSE_FORM},
+                        ],
+                    }
+                },
+            },
+        }
+    }
+
+
+class AvailabilitySelectionTests(ReferralTestBase):
+    """Care as the referring BAP: the BPP's availability and forms drive init / confirm."""
+
+    def setUp(self):
+        super().setUp()
+        self.patient = self.create_patient(name="Ravi", gender="male")
+        self.txn_id = self.new_transaction()
+        self.bap(self.txn_id, "select", {"offer_id": f"offer-{REMOTE_AVAILABILITY}"})
+        self.callback("on_select", self.txn_id, on_select_message())
+
+    def sent_payload(self, action):
+        return next(p for _, a, p in reversed(self.sent) if a == action)
+
+    def body(self, **extra):
+        return {"facility": str(self.origin.external_id), "patient": str(self.patient.external_id), **extra}
+
+    def test_on_select_keeps_the_availability_and_its_forms_for_the_fe(self):
+        availability = self.poll(self.txn_id)["availability"]
+        self.assertEqual(
+            (availability["id"], availability["referral_type"], availability["facility_id"]),
+            (REMOTE_AVAILABILITY, "consultation", REMOTE_FACILITY),
+        )
+        forms = [
+            (item["questionnaire_type"], item["questionnaire"]["title"]) for item in availability["questionnaires"]
+        ]
+        self.assertEqual(forms, [("request", "Referral Request Form"), ("response", "Referral Response Form")])
+
+    def test_a_new_select_forgets_the_previous_availability(self):
+        self.bap(self.txn_id, "select", {"offer_id": "offer-other"})
+        self.assertIsNone(self.poll(self.txn_id)["availability"])
+
+    def test_init_without_the_request_answers_is_a_400(self):
+        response = self.bap(self.txn_id, "init", self.body())
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["errors"][0]["code"], "70006")
+
+    def test_init_with_a_form_of_another_availability_is_a_400(self):
+        body = self.body(questionnaire=RESPONSE_FORM["id"], questionnaire_response=ANSWERS)
+        response = self.bap(self.txn_id, "init", body)
+        self.assertEqual((response.status_code, response.json()["errors"][0]["code"]), (400, "70007"))
+        malformed = self.body(questionnaire=REQUEST_FORM["id"], questionnaire_response={"results": "x"})
+        self.assertEqual(self.bap(self.txn_id, "init", malformed).json()["errors"][0]["code"], "70007")
+
+    def test_init_carries_the_availability_and_the_answered_request_form(self):
+        body = self.body(questionnaire=REQUEST_FORM["id"], questionnaire_response=ANSWERS)
+        self.assertEqual(self.bap(self.txn_id, "init", body).status_code, 202)
+        attributes = self.sent_payload("init")["message"]["contract"]["contractAttributes"]
+        self.assertEqual(attributes["assignedFacilityId"], REMOTE_FACILITY)
+        self.assertEqual(attributes["targetCriteria"]["serviceCategory"]["code"], "CONSULTATION")
+        referral = attributes["referral"]
+        self.assertEqual(referral["availability"], {"id": REMOTE_AVAILABILITY})
+        (form,) = referral["responses"]
+        self.assertEqual(
+            (form["ref"], form["questionnaireType"], form["status"], form["revision"]),
+            (f"request-{self.txn_id}", "request", "completed", 3),
+        )
+        self.assertEqual((form["questionnaire"], form["questionnaireResponse"]), (REQUEST_FORM, ANSWERS))
+
+    def test_an_on_init_error_creates_nothing_and_init_can_be_retried(self):
+        body = self.body(questionnaire=REQUEST_FORM["id"], questionnaire_response=ANSWERS)
+        self.bap(self.txn_id, "init", body)
+        error = {"type": "DOMAIN-ERROR", "code": "70007", "message": "bad", "paths": [QUESTION]}
+        self.callback("on_init", self.txn_id, {"contract": {"status": {"code": "DRAFT"}}}, error=error)
+        poll = self.poll(self.txn_id)
+        self.assertEqual(
+            (poll["status"], poll["last_error"]["code"], poll["last_error"]["paths"]), ("ERROR", "70007", [QUESTION])
+        )
+        self.assertFalse(Referral.objects.exists())
+        self.assertEqual(self.bap(self.txn_id, "init", body).status_code, 202)
+
+    def test_on_confirm_creates_the_origin_referral_on_the_remote_availability_with_its_forms(self):
+        body = self.body(questionnaire=REQUEST_FORM["id"], questionnaire_response=ANSWERS, title="Heart")
+        self.bap(self.txn_id, "confirm", body)
+        message = {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}}
+        self.callback("on_confirm", self.txn_id, message)
+        self.callback("on_confirm", self.txn_id, message, message_id="cb-2")
+        referral = Referral.objects.get()
+        self.assertEqual((referral.status, referral.title), ("in_progress", "Heart"))
+        availability = referral.availability
+        self.assertEqual(availability.name, "Cardiology desk - Medicity")
+        self.assertEqual(
+            availabilities.target_of(availability),
+            {
+                "bppId": "bpp.remote",
+                "bppUri": "http://bpp.remote",
+                "assignedFacilityId": REMOTE_FACILITY,
+                "availabilityId": REMOTE_AVAILABILITY,
+            },
+        )
+        mappings = availability.questionnaire_mappings.select_related("questionnaire").order_by("questionnaire_type")
+        self.assertEqual(
+            [(m.questionnaire_type, m.questionnaire.title, m.questionnaire.status) for m in mappings],
+            [("request", "Referral Request Form", "retired"), ("response", "Referral Response Form", "retired")],
+        )
+        response = ReferralQuestionnaireResponse.objects.get(referral=referral)
+        self.assertEqual(
+            (response.questionnaire_type, response.questionnaire_snapshot, response.questionnaire_response),
+            ("request", REQUEST_FORM, ANSWERS),
+        )
+        self.assertEqual((response.meta, response.questionnaire_revision), ({"ccn_ref": f"request-{self.txn_id}"}, 3))
+        self.assertEqual(response.questionnaire, mappings[0].questionnaire)
+        self.assertEqual([a for _, a, _ in self.sent].count("update"), 0)
 
 
 class FlowAdapterTests(ReferralTestBase):
@@ -25,6 +175,27 @@ class FlowAdapterTests(ReferralTestBase):
             context["schemaContext"], ["https://schema.beckn.io/ServiceCoordinationResource/v2.1/context.jsonld"]
         )
         self.assertNotIn("bppId", context)
+
+    def test_discover_searches_manual_review_providers_by_text(self):
+        self.stub_delivery()
+        self.bap(body={"text_search": "Care Coordination Desk", "health_service_type": "CONSULTATION"})
+        intent = self.sent_payload("discover")["message"]["intent"]
+        self.assertEqual(
+            intent,
+            {
+                "textSearch": "Care Coordination Desk",
+                "filters": {
+                    "type": "jsonpath",
+                    "expression": '$.catalogs[*].resources[*] ? (@.resourceAttributes.acceptanceMode == "MANUAL_REVIEW")',
+                },
+            },
+        )
+
+    def test_discover_keeps_an_explicit_filter(self):
+        self.stub_delivery()
+        filters = {"type": "jsonpath", "expression": "$.catalogs[*]"}
+        self.bap(body={"filters": filters})
+        self.assertEqual(self.sent_payload("discover")["message"]["intent"], {"filters": filters})
 
     def test_select_requires_an_offer_id(self):
         txn_id = self.new_transaction()
@@ -138,15 +309,14 @@ class BAPReceiverTests(ReferralTestBase):
         self.assertEqual(poll["contract_id"], "c-1")
         self.assertEqual(poll["routing"]["bpp_id"], "bpp.remote")
 
-    def test_on_init_creates_the_pending_origin_referral(self):
+    def test_on_init_only_validates_and_creates_no_referral(self):
         txn_id = self.new_transaction()
         patient = self.create_patient(name="Ravi")
         body = {"facility": str(self.origin.external_id), "patient": str(patient.external_id), "title": "Heart"}
         self.bap(txn_id, "init", body)
         self.callback("on_init", txn_id, {"contract": {"id": "c-1", "status": {"code": "DRAFT"}}})
-        referral = lifecycle.current(txn_id, lifecycle.ORIGIN)
-        self.assertEqual((referral.status, referral.title, referral.patient), ("pending", "Heart", patient))
-        self.assertEqual(self.poll(txn_id)["referral_id"], str(referral.external_id))
+        self.assertFalse(Referral.objects.exists())
+        self.assertIsNone(self.poll(txn_id)["referral_id"])
 
     def test_on_confirm_creates_the_in_progress_origin_referral_from_the_stored_params(self):
         txn_id = self.new_transaction()
@@ -234,12 +404,12 @@ class BAPReceiverTests(ReferralTestBase):
         self.callback("on_confirm", txn_id, message, message_id="cb-2")
         self.assertEqual(Referral.objects.count(), 1)
 
-    def test_on_confirm_approves_the_existing_referral(self):
+    def test_on_confirm_after_init_creates_the_in_progress_referral(self):
         txn_id = self.new_transaction()
         body = {"facility": str(self.origin.external_id), "patient_name": "Asha"}
         self.bap(txn_id, "init", body)
         self.callback("on_init", txn_id, {"contract": {"id": "c-1", "status": {"code": "DRAFT"}}})
-        self.assertEqual(Referral.objects.get().status, "pending")
+        self.assertFalse(Referral.objects.exists())
         self.bap(txn_id, "confirm", body)
         self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
         self.assertEqual(Referral.objects.get().status, "in_progress")
@@ -311,18 +481,10 @@ class EncounterReferralTests(ReferralTestBase):
         referral = lifecycle.current(txn_id, lifecycle.ORIGIN)
         self.assertEqual((referral.encounter, referral.patient), (self.encounter, self.patient))
 
-    def test_on_init_links_the_pending_origin_referral_to_the_encounter(self):
-        txn_id = self.new_transaction()
-        self.bap(txn_id, "init", self.body(patient=str(self.patient.external_id)))
-        self.callback("on_init", txn_id, {"contract": {"id": "c-1", "status": {"code": "DRAFT"}}})
-        referral = Referral.objects.get()
-        self.assertEqual((referral.status, referral.encounter), ("pending", self.encounter))
-
-    def test_on_confirm_links_an_existing_origin_referral_to_the_encounter(self):
+    def test_the_confirm_encounter_wins_over_an_init_without_one(self):
         txn_id = self.new_transaction()
         self.bap(txn_id, "init", {"facility": str(self.origin.external_id), "patient": str(self.patient.external_id)})
         self.callback("on_init", txn_id, {"contract": {"id": "c-1", "status": {"code": "DRAFT"}}})
-        self.assertIsNone(Referral.objects.get().encounter)
         self.bap(txn_id, "confirm", self.body())
         self.callback("on_confirm", txn_id, {"contract": {"id": "c-1", "status": {"code": "ACTIVE"}}})
         referral = Referral.objects.get()

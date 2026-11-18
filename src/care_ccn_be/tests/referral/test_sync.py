@@ -18,7 +18,7 @@ from care_ccn_be.tasks.referral import import_referral_file, sync_referral
 from care_ccn_be.tests.referral.base import REFERRAL_PLUGIN, ReferralTestBase
 
 FILES_HOST = "files.remote"
-SYNC_PLUGIN = {**REFERRAL_PLUGIN, "BECKN_ARTIFACT_ALLOWED_HOSTS": [FILES_HOST], "BECKN_ARTIFACT_MAX_BYTES": 1024}
+SYNC_PLUGIN = {**REFERRAL_PLUGIN, "BECKN_ARTIFACT_MAX_BYTES": 1024}
 SNAPSHOT = {
     "id": "q-remote",
     "title": "Cardiology findings",
@@ -433,6 +433,24 @@ class AssignedSyncTests(SyncTestBase):
         self.assigned.refresh_from_db()
         self.assertEqual(self.assigned.status, "in_progress")
 
+    def test_an_update_with_an_undownloadable_document_is_rejected_whole(self):
+        for document in ({"url": "ftp://other.host/ecg"}, {"mime_type": "text/html"}):
+            self.sent.clear()
+            self.update(remote_sync(**document), message_id=f"m-{document}")
+            (callback,) = [p for _, a, p in self.sent if a == "on_update"]
+            self.assertEqual(callback["error"]["code"], "70002")
+            self.assertIn("file-remote-1", callback["error"]["message"])
+        self.http_get.assert_not_called()
+        self.assertFalse(ReferralResource.objects.filter(referral=self.assigned).exists())
+        self.assertFalse(ReferralQuestionnaireResponse.objects.filter(referral=self.assigned).exists())
+
+    def test_already_imported_documents_are_not_checked_again(self):
+        self.update(remote_sync())
+        self.sent.clear()
+        self.update(remote_sync(url="ftp://other.host/ecg"), message_id="m-3")
+        (callback,) = [p for _, a, p in self.sent if a == "on_update"]
+        self.assertNotIn("error", callback)
+
     def test_the_response_and_its_files_go_back_with_the_status(self):
         file = self.share_file(self.assigned, category="response")
         self.answer(self.assigned, questionnaire_type="response")
@@ -469,10 +487,23 @@ class DownloadTests(SyncTestBase):
         attachment = attachment or {"ref": document["label"], "category": "source", "name": "ECG"}
         return import_referral_file(self.assigned.pk, document, attachment)
 
-    def test_only_allowed_https_hosts_are_fetched(self):
-        for url in ("https://internal.local/x", "http://files.remote/x", "file:///etc/passwd", ""):
+    def test_only_https_urls_are_fetched(self):
+        for url in (
+            "http://files.remote/x",
+            "file:///etc/passwd",
+            "https:///x",
+            "",
+            "https://localhost/x",
+            "https://127.0.0.1/x",
+            "https://[::1]/x",
+        ):
             self.assertEqual(self.run_import(remote_document(url=url)), "rejected")
         self.http_get.assert_not_called()
+
+    def test_debug_accepts_localhost_over_http(self):
+        with override_settings(DEBUG=True):
+            for url in ("http://localhost:9000/x", "http://127.0.0.1/x"):
+                artifacts.check_url(url)
 
     def test_disallowed_mime_types_are_not_fetched(self):
         self.assertEqual(self.run_import(remote_document(mime_type="text/html")), "rejected")

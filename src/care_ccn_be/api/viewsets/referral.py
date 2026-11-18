@@ -1,9 +1,11 @@
 """Referral APIs: BAP and BPP behavior in one flow viewset."""
 
+import logging
 from typing import Any
 from uuid import UUID
 
 from care.utils.shortcuts import get_object_or_404
+from pydantic import ValidationError as PydanticValidationError
 
 from care_ccn_be import store
 from care_ccn_be.api.viewsets.base import (
@@ -23,6 +25,8 @@ from care_ccn_be.flows.referral import ReferralFlow
 from care_ccn_be.models import Adapter
 from care_ccn_be.models.referral import ReferralLink
 from care_ccn_be.protocol.actions import CONFIRM, CONTRACT_ACTIVE, CONTRACT_COMPLETED, INIT
+from care_ccn_be.protocol.discover import build_discover_intent
+from care_ccn_be.resources.beckn.codes import CoordinationAcceptanceMode
 from care_ccn_be.resources.builders.referral import (
     CATEGORY_FOR_TYPE,
     ReferralConfirmBuilder,
@@ -31,8 +35,9 @@ from care_ccn_be.resources.builders.referral import (
     ReferralRequest,
     ReferralSelectBuilder,
     referral_type_for_category,
+    request_form_ref,
 )
-from care_ccn_be.resources.referral.schema import LIFECYCLE_FULFILLED, ReferralMessage
+from care_ccn_be.resources.referral.schema import LIFECYCLE_FULFILLED, ReferralAvailabilityBlock, ReferralMessage
 from care_ccn_be.resources.referral.spec import (
     ReferralConfirmSpec,
     ReferralInitSpec,
@@ -43,11 +48,13 @@ from care_ccn_be.resources.referral.spec import (
 from care_ccn_be.services import availability as availabilities
 from care_ccn_be.services import encounter as encounters
 from care_ccn_be.services import facility as facilities
-from care_ccn_be.services import mappers, referral_sync
+from care_ccn_be.services import artifacts, mappers, referral_forms, referral_sync
 from care_ccn_be.services import patient as patients
 from care_ccn_be.services import referral as lifecycle
 from care_ccn_be.services.patient import find_or_create_patient
 from care_ccn_be.services.users import system_user
+
+logger = logging.getLogger(__name__)
 
 INVALID_PAYLOAD = "70002"
 
@@ -111,6 +118,10 @@ def facility_candidates(call: BppCall) -> tuple[list, list]:
     return origin, assigned
 
 
+def first(values) -> str | None:
+    return next((str(value) for value in values if value), None)
+
+
 class ReferralViewSet(
     DiscoverMixin,
     SelectMixin,
@@ -135,7 +146,9 @@ class ReferralViewSet(
     on_confirm_spec = ReferralMessage
     on_status_spec = ReferralMessage
     on_update_spec = ReferralMessage
-    on_discover_spec = None  # the coordination centre publishes the referral catalog, not Care
+    on_discover_spec = None  # the referral catalog is published (publish_beckn_catalog), not answered on discover
+    # referral units and coordination desks are ServiceCoordinationResources: no healthServiceType to filter on
+    discover_filter_keys = ("acceptanceMode",)
 
     def get_object(self):
         queryset = self.get_queryset()
@@ -167,6 +180,11 @@ class ReferralViewSet(
         return get_object_or_404(queryset, transaction_id=identifier)
 
     # ------------------------------------------------------------------ BAP
+    def build_discover(self, request_obj, txn, state):
+        """Provider search: only resources that take referrals for review (appointment resources are ``AUTO``)."""
+        query = {"acceptanceMode": CoordinationAcceptanceMode.MANUAL_REVIEW.value, **request_obj.intent_query()}
+        return {"intent": build_discover_intent(query, self.discover_filter_keys)}
+
     def perform_discover(self, request_obj, txn, msg) -> None:
         store.update_transaction(txn, coordination_id=txn.transaction_id)
 
@@ -175,32 +193,39 @@ class ReferralViewSet(
 
     def perform_select(self, request_obj: ReferralSelectSpec, txn, msg) -> None:
         if request_obj.offer_id:
-            store.update_state(txn, self.flow, offer_id=request_obj.offer_id)
+            store.update_state(txn, self.flow, offer_id=request_obj.offer_id, availability=None)
+
+    def on_select(self, call: CallbackCall) -> None:
+        """The availability the BPP answered with, and the forms the FE renders for it."""
+        if call.error:
+            return
+        block = (mappers.get_contract_attributes(call.message).get("referral") or {}).get("availability")
+        if not isinstance(block, dict) or not block.get("id"):
+            return
+        try:
+            availability = ReferralAvailabilityBlock.model_validate(block)
+        except PydanticValidationError:
+            logger.warning("ignoring an invalid referral availability in on_select of %s", call.txn.transaction_id)
+            return
+        stored = availability.model_dump(mode="json", by_alias=False, exclude_none=True)
+        store.update_state(call.txn, self.flow, availability=stored)
 
     def build_init(self, request_obj, txn, state):
         return ReferralInitBuilder().message(ReferralRequest.of(request_obj, txn, state))
 
     def authorize_init(self, request_obj: ReferralInitSpec, txn) -> None:
         self.validate_encounter(request_obj)
+        self.validate_request_form(request_obj, txn)
 
     def perform_init(self, request_obj: ReferralInitSpec, txn, msg) -> None:
         self.remember_params(INIT, request_obj, txn)
-
-    def on_init(self, call: CallbackCall) -> None:
-        """The origin referral is recorded as soon as the coordinator accepts the draft."""
-        if call.error:
-            return
-        state = store.get_state(call.txn, self.flow)
-        params = state.init or state.confirm
-        has_patient = params and (params.get("patient") or params.get("patient_name") or params.get("encounter"))
-        if has_patient and facilities.by_external_id(params.get("facility")) is not None:
-            self.ensure_origin(call, params, approved=False)
 
     def build_confirm(self, request_obj, txn, state):
         return ReferralConfirmBuilder().message(ReferralRequest.of(request_obj, txn, state))
 
     def authorize_confirm(self, request_obj: ReferralConfirmSpec, txn) -> None:
         self.validate_encounter(request_obj)
+        self.validate_request_form(request_obj, txn)
 
     def perform_confirm(self, request_obj: ReferralConfirmSpec, txn, msg) -> None:
         self.remember_params(CONFIRM, request_obj, txn)
@@ -217,6 +242,7 @@ class ReferralViewSet(
         elif params:
             existing = self.ensure_origin(call, params, approved=True)
         if existing is not None:
+            self.save_sent_form(call, existing, params or {})
             link = lifecycle.current_link(lifecycle.coordination_of(call.txn), lifecycle.ORIGIN)
             if link is None:
                 raise RuntimeError("confirmed origin referral has no active network link")
@@ -246,6 +272,52 @@ class ReferralViewSet(
             params["encounter"] = str(request_obj.encounter)
         store.update_state(txn, self.flow, **{action_name: params})
 
+    def validate_request_form(self, request_obj, txn) -> None:
+        """The request form of the selected availability must be answered; the BPP validates the answers."""
+        if request_obj.message is not None:
+            return
+        state = store.get_state(txn, self.flow)
+        if not state.availability:
+            if request_obj.questionnaire:
+                raise BecknError(INVALID_PAYLOAD, "Select a referral availability before answering its questionnaire")
+            return
+        availability = ReferralAvailabilityBlock.model_validate(state.availability)
+        if not request_obj.questionnaire:
+            if availability.of_type(availabilities.REQUEST):
+                raise BecknError(
+                    referral_forms.FORM_REQUIRED, f"The request questionnaire of {availability.name!r} must be answered"
+                )
+            return
+        if availability.questionnaire(request_obj.questionnaire, availabilities.REQUEST) is None:
+            raise BecknError(
+                referral_forms.FORM_INVALID, "questionnaire is not a request questionnaire of the selected availability"
+            )
+        from care.emr.resources.questionnaire_response.spec import QuestionnaireResponseSubmission
+
+        try:
+            QuestionnaireResponseSubmission.model_validate(request_obj.questionnaire_response or {})
+        except PydanticValidationError as exc:
+            reasons = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:5])
+            raise BecknError(referral_forms.FORM_INVALID, f"questionnaire_response: {reasons}") from exc
+
+    @staticmethod
+    def remote_availability(txn) -> ReferralAvailabilityBlock | None:
+        data = (txn.state or {}).get("availability")
+        return ReferralAvailabilityBlock.model_validate(data) if data else None
+
+    @staticmethod
+    def save_sent_form(call: CallbackCall, referral, params: dict) -> None:
+        """Keep the request form the BPP accepted on the origin referral."""
+        availability = ReferralViewSet.remote_availability(call.txn)
+        questionnaire_id = params.get("questionnaire")
+        if availability is None or not questionnaire_id:
+            return
+        snapshot = availability.questionnaire(questionnaire_id, availabilities.REQUEST)
+        if snapshot is None:
+            return
+        ref = request_form_ref(lifecycle.coordination_of(call.txn))
+        referral_forms.save_sent(referral, ref, snapshot, params.get("questionnaire_response") or {})
+
     @staticmethod
     def validate_encounter(request_obj) -> None:
         """An encounter must belong to the referral's patient and origin facility."""
@@ -273,12 +345,25 @@ class ReferralViewSet(
         encounter = encounters.by_external_id(params.get("encounter"))
         patient = origin_patient(params, facility, encounter)
         txn = call.txn
-        availability = availabilities.network(
-            txn.counterparty_id,
-            txn.counterparty_uri,
-            referral_type_for_category(params.get("category")),
-            params.get("assigned_facility_id"),
-        )
+        remote = ReferralViewSet.remote_availability(txn)
+        if remote is None:
+            availability = availabilities.network(
+                txn.counterparty_id,
+                txn.counterparty_uri,
+                referral_type_for_category(params.get("category")),
+                params.get("assigned_facility_id"),
+            )
+        else:
+            name = " - ".join(filter(None, [remote.name, remote.facility_name]))
+            availability = availabilities.network(
+                txn.counterparty_id,
+                txn.counterparty_uri,
+                remote.referral_type or referral_type_for_category(params.get("category")),
+                params.get("assigned_facility_id") or remote.facility_id,
+                name=name or None,
+                availability_id=remote.id,
+            )
+            availabilities.link_questionnaires(availability, remote)
         data = lifecycle.ReferralData(
             patient=patient,
             availability=availability,
@@ -292,26 +377,46 @@ class ReferralViewSet(
 
     # ------------------------------------------------------------------ BPP
     def perform_on_select(self, request_obj, call: BppCall) -> dict[str, Any]:
-        return ReferralEcho.on_select(call.message)
+        """A selected catalog offer is answered with its availability and the forms it asks for."""
+        _, claimed = facility_candidates(call)
+        availability = referral_forms.resolve(
+            call.message, first(claimed), None, mappers.referral_type(call.message), from_offer=True
+        )
+        return ReferralEcho.on_select(call.message, availabilities.block(availability) if availability else None)
 
     def perform_on_init(self, request_obj, call: BppCall) -> dict[str, Any]:
-        origin, assigned = self._facilities(call)
-        facility = origin or assigned
-        if facility is None:
+        """Init only validates: the receiving availability and its request form. Referrals are created on confirm."""
+        origin, assigned, availability = self._receiving(call)
+        if origin is None and assigned is None:
             raise BecknError(INVALID_PAYLOAD, "No facility id in payload; cannot create the referral")
-        role = lifecycle.ORIGIN if origin else lifecycle.ASSIGNED
-        referral = self._ensure(call, role, origin, assigned, approved=False)
-        return ReferralEcho.on_init(call.message, referral, self._details(call, role))
+        if mappers.find_patient_participant(call.message) is None:
+            raise BecknError(INVALID_PAYLOAD, "No patient participant in payload; cannot create the referral")
+        if availability is not None:
+            referral_forms.request_form(call.message, availability)
+        block = availabilities.block(availability, with_questionnaires=False) if availability else None
+        return ReferralEcho.validated(call.message, block)
 
     def perform_on_confirm(self, request_obj, call: BppCall) -> dict[str, Any]:
-        origin, assigned = self._facilities(call)
+        coordination_id = lifecycle.coordination_of(call.txn)
+        existing = lifecycle.current(coordination_id, lifecycle.ASSIGNED)
+        if existing is not None:
+            origin, _ = self._facilities(call)
+            availability = existing.availability
+            assigned, form = availabilities.facility_of(availability), None
+        else:
+            origin, assigned, availability = self._receiving(call)
+            form = referral_forms.request_form(call.message, availability) if availability else None
         if origin is None and assigned is None:
             raise BecknError(INVALID_PAYLOAD, "No facility id in payload; cannot confirm the referral")
         if origin is not None:
             self._ensure(call, lifecycle.ORIGIN, origin, assigned, approved=True)
         if assigned is not None:
-            self._ensure(call, lifecycle.ASSIGNED, origin, assigned, approved=True)
-        link = lifecycle.current_link(lifecycle.coordination_of(call.txn))
+            referral = self._ensure(
+                call, lifecycle.ASSIGNED, origin, assigned, approved=True, availability=availability
+            )
+            if form is not None:
+                referral_forms.save(form, referral)
+        link = lifecycle.current_link(coordination_id)
         return ReferralEcho.on_confirm(call.message, link.referral, link.details)
 
     def perform_on_status(self, request_obj, call: BppCall) -> dict[str, Any]:
@@ -321,10 +426,15 @@ class ReferralViewSet(
         return ReferralEcho.on_status(call.message, link.referral, link.details)
 
     def perform_on_update(self, request_obj, call: BppCall) -> dict[str, Any]:
-        """The referring side's files and answered forms are mirrored onto the assigned referral."""
+        """The referring side's files and answered forms are mirrored onto the assigned referral. An update carrying
+        a document that could never be downloaded is rejected as a whole, so the sender sees it in ``on_update``."""
         link = lifecycle.current_link(lifecycle.coordination_of(call.txn), lifecycle.ASSIGNED)
         if link is None:
             raise BecknError(NOT_FOUND, "Referral not found for update")
+        try:
+            artifacts.check_incoming(link.referral, call.message)
+        except artifacts.ArtifactRejected as exc:
+            raise BecknError(INVALID_PAYLOAD, f"Referral update rejected: {exc}") from exc
         referral_sync.receive(link.referral, call.message, mirror_status=False)
         return ReferralEcho.on_update(call.message, link.referral, link.details)
 
@@ -334,16 +444,23 @@ class ReferralViewSet(
         return facilities.resolve(origin), facilities.resolve(assigned)
 
     @staticmethod
-    def _details(call: BppCall, role: str) -> dict[str, Any]:
-        link = lifecycle.current_link(lifecycle.coordination_of(call.txn), role)
-        return link.details if link else {}
+    def _receiving(call: BppCall):
+        """(origin facility, receiving facility, its availability); a named availability fixes the facility."""
+        origin_ids, assigned_ids = facility_candidates(call)
+        origin, assigned = facilities.resolve(origin_ids), facilities.resolve(assigned_ids)
+        availability = referral_forms.resolve(
+            call.message, first(assigned_ids), assigned, mappers.referral_type(call.message)
+        )
+        if availability is not None:
+            assigned = availabilities.facility_of(availability)
+        return origin, assigned, availability
 
     @staticmethod
-    def _ensure(call: BppCall, role: str, origin, assigned, approved: bool):
+    def _ensure(call: BppCall, role: str, origin, assigned, approved: bool, availability=None):
         """Idempotent on (coordination id, role): an existing referral is reused, never duplicated.
 
         The origin referral sits on the network availability of the coordination centre (the referral the
-        referring side raised); the assigned one sits on the receiving facility's availability.
+        referring side raised); the assigned one sits on the receiving availability.
         """
         coordination_id = lifecycle.coordination_of(call.txn)
         existing = lifecycle.current(coordination_id, role)
@@ -356,13 +473,10 @@ class ReferralViewSet(
         )
         if patient is None:
             raise BecknError(INVALID_PAYLOAD, "No patient participant in payload; cannot create the referral")
-        referral_type = mappers.referral_type(call.message)
-        if role == lifecycle.ASSIGNED:
-            availability = availabilities.for_facility(assigned or facility, referral_type)
-        else:
+        if role == lifecycle.ORIGIN:
             cc = cc_endpoint()
             availability = availabilities.network(
-                cc.id, cc.uri, referral_type, str(assigned.external_id) if assigned else None
+                cc.id, cc.uri, mappers.referral_type(call.message), str(assigned.external_id) if assigned else None
             )
         data = lifecycle.ReferralData.from_message(
             call.message,

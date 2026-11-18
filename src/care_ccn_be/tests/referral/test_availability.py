@@ -5,6 +5,7 @@ from care.security.authorization import AuthorizationController
 from django.contrib.auth.models import AnonymousUser
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from model_bakery import baker
 
 from care_ccn_be.resources.builders.referral import referral_type_for_category
 from care_ccn_be.services import availability as availabilities
@@ -29,27 +30,47 @@ class AvailabilityServiceTests(ReferralTestBase):
         self.assertNotEqual(base.pk, availabilities.network("bpp.a", "http://a", assigned_facility_id="f").pk)
 
     def test_only_network_availabilities_have_a_target(self):
-        facility = availabilities.for_facility(self.target)
-        self.assertEqual(availabilities.target_of(facility), {})
-        self.assertFalse(availabilities.is_network(facility))
+        self.assertEqual(availabilities.target_of(self.receiving), {})
+        self.assertFalse(availabilities.is_network(self.receiving))
         self.assertTrue(availabilities.is_network(availabilities.network("bpp.a", "http://a")))
 
-    def test_the_facility_availability_the_facility_configured_is_reused(self):
-        configured = availabilities.for_facility(self.target)
-        self.assertEqual(availabilities.for_facility(self.target).pk, configured.pk)
-        self.assertEqual(
-            (configured.entity_type, configured.facility, configured.is_public), ("facility", self.target, False)
-        )
-        self.assertNotEqual(availabilities.for_facility(self.target, "lab").pk, configured.pk)
-        self.assertNotEqual(availabilities.for_facility(self.origin).pk, configured.pk)
+    def test_the_configured_facility_availability_is_found_and_none_is_ever_created(self):
+        count = ReferralAvailability.objects.count()
+        self.assertEqual(availabilities.for_facility(self.target), self.receiving)
+        self.assertIsNone(availabilities.for_facility(self.target, "lab"))
+        self.assertIsNone(availabilities.for_facility(self.origin))
+        self.assertEqual(ReferralAvailability.objects.count(), count)
 
-    def test_an_inactive_facility_availability_is_not_reused(self):
-        configured = availabilities.for_facility(self.target)
-        ReferralAvailability.objects.filter(pk=configured.pk).update(status="inactive")
-        self.assertNotEqual(availabilities.for_facility(self.target).pk, configured.pk)
+    def test_an_organization_availability_receives_for_its_facility(self):
+        from care.emr.models.organization import FacilityOrganization
+
+        organization = baker.make(FacilityOrganization, facility=self.origin, name="Cardiology")
+        availability = self.receiving_availability(
+            None, "lab", entity_type="internal_organization", internal_organization=organization
+        )
+        self.assertEqual(availabilities.for_facility(self.origin, "lab"), availability)
+        self.assertEqual(availabilities.facility_of(availability), self.origin)
+
+    def test_an_inactive_facility_availability_is_not_used(self):
+        ReferralAvailability.objects.filter(pk=self.receiving.pk).update(status="inactive")
+        self.assertIsNone(availabilities.for_facility(self.target))
+
+    def test_only_public_availabilities_are_published(self):
+        hidden = self.receiving_availability(self.target, "lab", is_public=False)
+        self.assertEqual(availabilities.published(self.receiving.external_id), self.receiving)
+        self.assertIsNone(availabilities.published(hidden.external_id))
+        self.assertIsNone(availabilities.published("not-a-uuid"))
+
+    def test_a_remote_availability_gets_its_own_network_availability_and_keeps_its_name(self):
+        base = availabilities.network("bpp.a", "http://a", assigned_facility_id="f")
+        remote = availabilities.network("bpp.a", "http://a", assigned_facility_id="f", name="A", availability_id="av-1")
+        self.assertNotEqual(base.pk, remote.pk)
+        self.assertEqual(availabilities.target_of(remote)["availabilityId"], "av-1")
+        again = availabilities.network("bpp.a", "http://a", assigned_facility_id="f", name="B", availability_id="av-1")
+        self.assertEqual((again.pk, again.name), (remote.pk, "B"))
 
     def test_assignees_are_a_copy_of_the_care_team(self):
-        availability = availabilities.for_facility(self.target)
+        availability = self.receiving
         availability.care_team = [{"user_id": 1, "role": {"code": "doctor"}}]
         copied = availabilities.assignees(availability)
         copied[0]["user_id"] = 2
@@ -77,7 +98,6 @@ class NetworkAvailabilityAccessTests(ReferralTestBase):
 
     def test_external_availabilities_are_listed_for_signed_in_users(self):
         availabilities.network("bpp.a", "http://a")
-        availabilities.for_facility(self.target)
         queryset = ReferralAvailability.objects.all()
         listed = self.call("get_accessible_referral_availabilities", queryset, self.user, "external")
         self.assertEqual([a.entity_type for a in listed], ["external"])
@@ -86,7 +106,7 @@ class NetworkAvailabilityAccessTests(ReferralTestBase):
         )
 
     def test_facility_availabilities_keep_the_core_rules(self):
-        availability = availabilities.for_facility(self.target)
+        availability = self.receiving_availability(self.target, "lab", is_public=False)
         self.assertFalse(self.call("can_view_referral_availability", self.user, availability))
 
     def test_a_user_can_submit_a_referral_on_a_network_availability(self):
@@ -112,7 +132,7 @@ class AvailabilityCommandTests(ReferralTestBase):
 
     def test_explicit_target_and_type(self):
         self.run_command("--bpp-id", "x", "--bpp-uri", "http://x", "--type", "lab", "--assigned-facility", "f-1")
-        availability = ReferralAvailability.objects.get()
+        availability = ReferralAvailability.objects.get(entity_type="external")
         self.assertEqual(
             availabilities.target_of(availability),
             {"bppId": "x", "bppUri": "http://x", "assignedFacilityId": "f-1"},

@@ -30,6 +30,7 @@ from care_ccn_be.resources.referral.schema import (
     LIFECYCLE_FULFILLED,
     HealthReferral,
     ReferralAttachment,
+    ReferralAvailabilityBlock,
     ReferralBlock,
     ReferralContract,
     ReferralFormResponse,
@@ -51,6 +52,11 @@ TYPE_FOR_CATEGORY = {"patient_care": mappers.REFERRAL_TYPE_CONSULTATION}
 def referral_type_for_category(category: str | None) -> str:
     """The Care referral type for a FE category: patient care is a consultation, anything else a lab referral."""
     return TYPE_FOR_CATEGORY.get(category or "", mappers.REFERRAL_TYPE_LAB)
+
+
+def request_form_ref(coordination_id: str) -> str:
+    """The ref of the request form a referral was raised with; both instances tag their copy with it."""
+    return f"request-{coordination_id}"
 
 
 def service_category_criteria(category: str | None) -> TargetCriteria:
@@ -167,6 +173,7 @@ class CareAttributesPart(Part):
 
     def build(self, spec, builder):
         origin, assigned = spec.origin_facility_id, spec.assigned_facility_id
+        availability_id = spec.target.get("availabilityId")
         return HealthReferral(
             coordination_id=spec.coordination_id,
             lifecycle_state=LIFECYCLE_ACTIVE,
@@ -175,6 +182,9 @@ class CareAttributesPart(Part):
             facility_id=origin or assigned,
             origin_facility_id=origin,
             assigned_facility_id=assigned,
+            referral=ReferralBlock(availability=ReferralAvailabilityBlock(id=availability_id))
+            if availability_id
+            else None,
         )
 
 
@@ -200,6 +210,14 @@ class ReferralRequest:
     assigned_facility_id: str | None = None
     emergency: bool = False
     priority: int | None = None
+    questionnaire: str | None = None
+    questionnaire_response: dict | None = None
+
+    @property
+    def availability(self) -> ReferralAvailabilityBlock | None:
+        """The availability the BPP returned on ``on_select``."""
+        data = getattr(self.state, "availability", None)
+        return ReferralAvailabilityBlock.model_validate(data) if data else None
 
     @classmethod
     def of(cls, request_obj, txn, state) -> "ReferralRequest":
@@ -214,6 +232,22 @@ class ReferralRequest:
         elif encounter:
             patient = encounters.get_by_external_id(encounter).patient
         return cls(txn=txn, state=state, patient=patient or None, **values)
+
+
+def request_form(spec: ReferralRequest, availability: ReferralAvailabilityBlock | None) -> ReferralFormResponse | None:
+    """The answered request form, with the questionnaire as the BPP published it."""
+    if not spec.questionnaire:
+        return None
+    snapshot = availability.questionnaire(spec.questionnaire, availabilities.REQUEST) if availability else None
+    snapshot = snapshot or {"id": str(spec.questionnaire)}
+    return ReferralFormResponse(
+        ref=request_form_ref(spec.txn.coordination_id or spec.txn.transaction_id),
+        questionnaire_type=availabilities.REQUEST,
+        status="completed",
+        revision=snapshot.get("internal_revision"),
+        questionnaire=snapshot,
+        questionnaire_response=spec.questionnaire_response or {},
+    )
 
 
 class OfferCommitmentPart(Part):
@@ -250,12 +284,25 @@ class BapAttributesPart(Part):
     def build(self, spec, builder):
         request = {}
         if builder.carries_request:
+            availability = spec.availability
+            category = spec.category
+            if category is None and availability is not None:
+                category = CATEGORY_FOR_TYPE.get(availability.referral_type)
+            form = request_form(spec, availability)
+            referral = None
+            if availability is not None or form is not None:
+                referral = ReferralBlock(
+                    availability=ReferralAvailabilityBlock(id=availability.id) if availability else None,
+                    responses=[form] if form else None,
+                )
             request = {
                 "facility_id": spec.facility,
                 "origin_facility_id": spec.facility,
-                "assigned_facility_id": spec.assigned_facility_id,
+                "assigned_facility_id": spec.assigned_facility_id
+                or (availability.facility_id if availability else None),
                 "clinical_urgency_tier": mappers.urgency_tier(spec.emergency, spec.priority),
-                "target_criteria": service_category_criteria(spec.category or "other"),
+                "target_criteria": service_category_criteria(category or "other"),
+                "referral": referral,
             }
         return HealthReferral(
             coordination_id=spec.txn.coordination_id or spec.txn.transaction_id,
@@ -331,9 +378,36 @@ class ReferralEcho(ContractBuilder):
     """BPP callbacks echo the inbound contract and overlay the state of the Care referral."""
 
     @classmethod
-    def on_select(cls, message: dict[str, Any]) -> dict[str, Any]:
+    def on_select(
+        cls, message: dict[str, Any], availability: ReferralAvailabilityBlock | None = None
+    ) -> dict[str, Any]:
         body = cls.echo(message, CONTRACT_DRAFT)
         strip_pricing(body["contract"])
+        return cls.with_availability(body, availability)
+
+    @classmethod
+    def validated(
+        cls, message: dict[str, Any], availability: ReferralAvailabilityBlock | None = None
+    ) -> dict[str, Any]:
+        """``on_init``: the request was checked; the referral itself is only created on confirm."""
+        body = cls.on_select(message, availability)
+        contract = ReferralContract.model_validate(body["contract"])
+        attributes = contract.contract_attributes or HealthReferral()
+        attributes.lifecycle_state = mappers.LIFECYCLE_DRAFT
+        contract.contract_attributes = attributes
+        body["contract"] = contract.dump()
+        return body
+
+    @staticmethod
+    def with_availability(body: dict[str, Any], availability: ReferralAvailabilityBlock | None) -> dict[str, Any]:
+        if availability is None:
+            return body
+        contract = ReferralContract.model_validate(body["contract"])
+        attributes = contract.contract_attributes or HealthReferral()
+        attributes.referral = attributes.referral or ReferralBlock()
+        attributes.referral.availability = availability
+        contract.contract_attributes = attributes
+        body["contract"] = contract.dump()
         return body
 
     @classmethod

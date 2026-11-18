@@ -3,6 +3,7 @@ from care_ccn_be.context import ReferralContext
 from care_ccn_be.flows.base import BecknFlow
 from care_ccn_be.resources.beckn import BecknRequest, contract_attributes
 from care_ccn_be.resources.beckn.health import HealthContract
+from care_ccn_be.resources.catalog.referral import ReferralCatalogBuilder
 from care_ccn_be.resources.referral.schema import HealthReferral
 from care_ccn_be.resources.referral.spec import ReferralState
 
@@ -11,6 +12,7 @@ class ReferralFlow(BecknFlow):
     name = "referral"
     context_builder = ReferralContext
     state_model = ReferralState
+    catalog_builder = ReferralCatalogBuilder
 
     @classmethod
     def match(cls, request: BecknRequest) -> int:

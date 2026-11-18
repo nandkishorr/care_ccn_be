@@ -10,6 +10,8 @@ DEFAULTS = {
     "BECKN_BPP_URI": "",
     "BECKN_BPP_CALLER_URL": "",
     "BECKN_CATALOG_PUBLISH_URL": "",
+    # networks a published catalog is visible to, besides BECKN_NETWORK_ID
+    "BECKN_CATALOG_VISIBLE_TO": ["be", "nfh.global/beckn-nodes", "beckn.one/testnet", "nfh.global/testnet"],
 }
 
 CATALOG_PUBLISH = "catalog/publish"
@@ -38,6 +40,11 @@ def bpp_endpoint() -> Endpoint:
 
 def bpp_caller_url() -> str:
     return _settings().BECKN_BPP_CALLER_URL
+
+
+def catalog_visible_to(network_id: str | None) -> list[str]:
+    networks = [network_id, *(_settings().BECKN_CATALOG_VISIBLE_TO or [])]
+    return list(dict.fromkeys(network for network in networks if network))
 
 
 def catalog_publish_base() -> str:
